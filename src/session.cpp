@@ -13,6 +13,7 @@ static fs::path LogsDir() {
 Session::Session(const Device &device, const SessionOptions &options) : device_(device) {
     muted = options.muted;
     internet = options.internet;
+    webProxy = options.webProxy;
     StartUsbmuxd();
     try {
         StartWorker(options);
@@ -121,6 +122,8 @@ void Session::StartWorker(const SessionOptions &options) {
                    std::to_wstring(reinterpret_cast<uintptr_t>(eventsWrite))};
     if (options.internet)
         launch.args.push_back(L"--internet");
+    if (options.webProxy)
+        launch.args.push_back(L"--web-proxy");
     if (options.headphones)
         launch.args.push_back(L"--headphones");
     if (options.muted)
@@ -243,6 +246,9 @@ void Session::HandleEvent(const Json &event) {
             pending_.erase(found);
             callback(event);
         }
+    } else if (kind == "proxy") {
+        proxyStatus = event.value("status", "");
+        proxyError = event.value("error", false);
     } else if (kind == "progress") {
         progress = event.value("text", "");
     } else if (kind == "log") {

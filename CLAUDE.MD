@@ -52,7 +52,7 @@ iOS-Emulator --prepare n18ap-8C148 --jailbreak
 iOS-Emulator --run <device> --seconds 120 --screenshot shot.png --tap 0.5,0.9,60 --request 90 "{\"cmd\":\"shell\",\"command\":\"ls /\"}"
 ```
 
-`--run` exits 0 only when iOS shut down cleanly. The iPod touch 2G on 3.1.3 boots fastest. Logs are in `%LOCALAPPDATA%\iOS-Emulator\logs\` (`app.log`, `worker-*.log`, `usbmuxd-*.log`, `firmwarekit.log`). `IOS_EMULATOR_ENGINE_ARGS` passes extra QEMU options to the engine.
+`--run` takes `--internet` (off by default) and `--no-web-proxy` (the proxy is on by default). `--run` exits 0 only when iOS shut down cleanly. The iPod touch 2G on 3.1.3 boots fastest. Logs are in `%LOCALAPPDATA%\iOS-Emulator\logs\` (`app.log`, `worker-*.log`, `usbmuxd-*.log`, `firmwarekit.log`). `IOS_EMULATOR_ENGINE_ARGS` passes extra QEMU options to the engine.
 
 ## Architecture
 
@@ -70,6 +70,8 @@ One executable, several modes (`wWinMain` in `src/main.cpp`): no arguments opens
 - Developer requests carry an `id`. `Session::Request` calls the reply callback from `Update()` on the caller's thread.
 
 **Developer services (`services.cpp`)** run inside the worker, not the UI. They use libimobiledevice through usbmuxd: lockdown info, AFC2 (root filesystem on jailbroken devices) or AFC (Media folder only), app install via AppSync, syslog_relay, and SSH port forwarding. The libimobiledevice DLLs are delay-loaded from `resources/`, and only worker mode calls `SetDllDirectoryW(ResourcesDir())`. Calling services from the UI process would fail to load them.
+
+**Web proxy (`proxy.cpp`)** runs inside the worker too. firmwarekit gives iOS a proxy auto-config file that sends web traffic to `10.0.2.100:3128` first, and the engine forwards that address (a `guestfwd` in `BuildBootArgs`) to the proxy's Unix socket. The forward must always be there: with nothing answering, every new connection in iOS waits out a timeout. Modes: Off (internet off, refuses), Direct (passes bytes through), Bridge (the default: re-encrypts HTTPS, old TLS to iOS and modern TLS to the website, which Windows' trust store checks). For Bridge, the worker installs the proxy's CA in iOS through the guest agent (`put`, then the bundled `ittrust add`). The CA is kept in `%LOCALAPPDATA%\iOS-Emulator\network\<id>\proxy-ca.pem`. OpenSSL is MSYS2's `mingw-w64-x86_64-openssl` 3.6.5, the same DLLs as in `resources/` (delay-loaded like libimobiledevice). `third_party/openssl/` holds that package's headers and import libraries made from the DLLs (`dumpbin /exports` into a `.def`, then `lib /def`). Those DLLs use another C runtime, so never pass them a `FILE*`. Use memory BIOs instead.
 
 **Adding a developer feature** usually touches: the request handler in `worker.cpp`, the implementation in `services.cpp`, the protocol comment in `worker.h`, and the tab in `ui.cpp`. It is then reachable from `--run --request` automatically.
 

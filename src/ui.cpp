@@ -38,6 +38,7 @@ namespace {
 // The app's preferences, kept in <data>\settings.json.
 struct Settings {
     bool internet = false;     // new sessions start with guest internet on
+    bool webProxy = true;      // ...and HTTPS through the web proxy (proxy.h)
     bool headphones = false;   // route sound to the headphone jack
     bool muted = false;
     bool smooth = true;        // smooth scaling of the screen (off: sharp pixels)
@@ -50,6 +51,7 @@ struct Settings {
         try {
             Json j = Json::parse(LoadFile(File()));
             internet = j.value("internet", internet);
+            webProxy = j.value("webProxy", webProxy);
             headphones = j.value("headphones", headphones);
             muted = j.value("muted", muted);
             smooth = j.value("smooth", smooth);
@@ -61,8 +63,8 @@ struct Settings {
     }
 
     void Save() const {
-        Json j = {{"internet", internet}, {"headphones", headphones}, {"muted", muted},
-                  {"smooth", smooth},     {"tilt", tilt},             {"selected", selected}};
+        Json j = {{"internet", internet}, {"webProxy", webProxy}, {"headphones", headphones}, {"muted", muted},
+                  {"smooth", smooth},     {"tilt", tilt},         {"selected", selected}};
         SaveFile(File(), j.dump(2));
     }
 };
@@ -144,6 +146,11 @@ const ImVec4 kBad(0.95f, 0.40f, 0.40f, 1.0f);
 const ImVec4 kDim(0.60f, 0.62f, 0.66f, 1.0f);
 
 void DimText(const std::string &text) { ImGui::TextColored(kDim, "%s", text.c_str()); }
+
+const char *const kWebProxyTip =
+    "HTTPS goes through a proxy on this computer, which speaks the old encryption iOS knows to iOS and modern "
+    "encryption to websites. Most of today's websites need it on these iOS versions. Off, iOS connects to "
+    "websites itself.";
 
 // A button that's drawn disabled (and never fires) when `enabled` is false.
 bool Button(const char *label, bool enabled = true, ImVec2 size = ImVec2(0, 0)) {
@@ -294,6 +301,7 @@ void App::StartDevice(const Device &device) {
     try {
         SessionOptions options;
         options.internet = settings_.internet;
+        options.webProxy = settings_.webProxy;
         options.headphones = settings_.headphones;
         options.muted = settings_.muted;
         sessions_[device.id] = std::make_unique<Session>(device, options);
@@ -683,6 +691,17 @@ void App::Controls(Session &session) {
         session.Send({{"cmd", "internet"}, {"on", session.internet}});
     Tooltip("Lets iOS reach the internet through your connection (Cydia needs it).");
     ImGui::SameLine();
+    if (ImGui::Checkbox("Web proxy", &session.webProxy))
+        session.Send({{"cmd", "webproxy"}, {"on", session.webProxy}});
+    const std::string proxyTip =
+        std::string(kWebProxyTip) + (session.proxyStatus.empty() ? "" : "\n\n" + session.proxyStatus);
+    Tooltip(proxyTip.c_str());
+    if (session.proxyError) {
+        ImGui::SameLine();
+        ImGui::TextColored(kWarn, "(!)");
+        Tooltip(session.proxyStatus.c_str());
+    }
+    ImGui::SameLine();
     if (ImGui::Button("Screenshot"))
         SaveScreenshot(session);
     ImGui::SameLine();
@@ -728,6 +747,8 @@ void App::SettingsPage() {
     DimText("NEW SESSIONS");
     changed |= ImGui::Checkbox("Internet", &settings_.internet);
     Tooltip("Devices start with internet access (you can switch it while one runs).");
+    changed |= ImGui::Checkbox("Web proxy", &settings_.webProxy);
+    Tooltip(kWebProxyTip);
     changed |= ImGui::Checkbox("Headphones plugged in", &settings_.headphones);
     Tooltip("iOS plays through the headphone jack: stereo, without the speaker's EQ (a little faster).");
     changed |= ImGui::Checkbox("Start muted", &settings_.muted);

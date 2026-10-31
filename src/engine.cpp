@@ -167,7 +167,15 @@ std::vector<std::string> BuildBootArgs(const Device &device, const BootOptions &
     std::vector<std::string> args = {"iOS-Emulator", "-M", machine};
     // Wi-Fi through QEMU's user-mode network. restrict=on blocks all traffic; the UI's internet
     // switch flips it live (qemu_ios_ui_net_restrict). lan=off keeps the guest off your LAN.
-    args.insert(args.end(), {"-netdev", std::string("user,id=wifi0,lan=off,restrict=") + (options.internet ? "off" : "on")});
+    std::string netdev = std::string("user,id=wifi0,lan=off,restrict=") + (options.internet ? "off" : "on");
+    // iOS's proxy settings point at 10.0.2.100:3128: forward it to the web proxy (forwards work
+    // even while restrict=on). A comma inside an option value is written twice.
+    if (!options.proxySocket.empty()) {
+        netdev += ",guestfwd=tcp:10.0.2.100:3128-unix:";
+        for (char c : file(options.proxySocket))
+            netdev += c == ',' ? std::string(",,") : std::string(1, c);
+    }
+    args.insert(args.end(), {"-netdev", netdev});
     // Faster code translation: iOS never rewrites code pages in place, so jumps can be chained.
     args.insert(args.end(), {"-accel", "tcg,cross-page-chain=on,indirect-cache=on"});
     if (family == Family::S5L8720)

@@ -4,9 +4,10 @@
 // Usage:
 //   iOS-Emulator.exe                       the app window
 //   iOS-Emulator.exe --list                lists the devices in the library
-//   iOS-Emulator.exe --run <device> [--seconds N] [--screenshot file.png] [--internet]
+//   iOS-Emulator.exe --run <device> [--seconds N] [--screenshot file.png] [--internet] [--no-web-proxy]
 //                    [--tap x,y,t ...] [--swipe x,y,toX,toY,t[,seconds] ...] [--request t json ...]
 //                                          boots a device without a window (for testing and scripts);
+//                                          --no-web-proxy lets iOS connect to websites itself (proxy.h);
 //                                          --tap/--swipe touch the screen (coordinates 0..1) t seconds after start;
 //                                          --request sends a developer command (worker.h) and prints the reply
 //   iOS-Emulator.exe --catalog [product]   lists the firmwares that can be prepared
@@ -80,6 +81,8 @@ static int RunCommand(const std::vector<std::string> &args) {
             screenshot = args[++i];
         else if (args[i] == "--internet")
             options.internet = true;
+        else if (args[i] == "--no-web-proxy")
+            options.webProxy = false;
         else
             name = args[i];
     }
@@ -230,7 +233,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             Print("Imported " + device.name + " as " + device.id);
             return 0;
         }
-        Print("usage: iOS-Emulator [--list | --run <device> [--seconds N] [--screenshot F] [--internet] | "
+        Print("usage: iOS-Emulator [--list | --run <device> [--seconds N] [--screenshot F] [--internet] [--no-web-proxy] | "
               "--catalog | --prepare <firmware> [--jailbreak] | --import <folder>]");
         return 64;
     } catch (const std::exception &e) {

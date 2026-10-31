@@ -49,6 +49,7 @@ struct BootOptions {
     std::string machine;     // the engine's -M name for the board (Engine::FindBoard)
     bool internet = false;   // let the guest reach the internet (NAT); off blocks everything
     bool headphones = false; // route sound to the headphone jack (stereo, no speaker EQ)
+    fs::path proxySocket;    // the web proxy's Unix socket (proxy.h); empty: no proxy forward
 };
 
 // Prepares the device's state folder for a boot (creates the NAND overlay folder, copies the

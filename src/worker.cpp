@@ -2,6 +2,7 @@
 
 #include "engine.h"
 #include "library.h"
+#include "proxy.h"
 #include "services.h"
 
 #include <mmsystem.h>
@@ -85,8 +86,10 @@ private:
 
 class Worker {
 public:
-    Worker(Device device, const std::string &framesName, HANDLE events, bool internet, bool headphones, bool muted)
-        : device_(std::move(device)), events_(events), internet_(internet), headphones_(headphones), muted_(muted) {
+    Worker(Device device, const std::string &framesName, HANDLE events, bool internet, bool webProxy, bool headphones,
+           bool muted)
+        : device_(std::move(device)), events_(events), internet_(internet), webProxy_(webProxy), headphones_(headphones),
+          muted_(muted) {
         frames_.Open(framesName);
     }
 
@@ -114,6 +117,9 @@ private:
     void PublishFrame();
     void SendStatusIfChanged();
     void Shutdown();
+    void StartWebProxy(BootOptions &options);
+    void UpdateWebProxy();
+    void TrustWebProxy();
     AgentReply Agent(const std::string &op, const std::string &argument, const std::string &body,
                      std::chrono::milliseconds timeout = 30s);
 
@@ -121,7 +127,8 @@ private:
     std::unique_ptr<Engine> engine_;
     FrameMapping frames_;
     HANDLE events_;
-    bool internet_, headphones_;
+    std::atomic<bool> internet_, webProxy_;
+    bool headphones_;
     std::atomic<bool> muted_;
 
     std::mutex eventsMutex_;                 // one writer at a time on the events pipe
@@ -147,6 +154,9 @@ private:
     std::deque<std::function<void()>> tasks_;
 
     Services services_;                      // USB developer services (files, apps, syslog, SSH)
+
+    std::unique_ptr<WebProxy> proxy_;        // the guest's web proxy (proxy.h); null if it couldn't start
+    std::atomic<bool> trusting_{false};      // its certificate is installed in iOS, or being installed
 };
 
 void Worker::Send(const Json &event) {
@@ -182,6 +192,7 @@ int Worker::Run() {
     options.machine = board.machine;
     options.internet = internet_;
     options.headphones = headphones_;
+    StartWebProxy(options);
     std::vector<std::string> args = BuildBootArgs(device_, options);
     // For engine debugging: IOS_EMULATOR_ENGINE_ARGS adds QEMU options, separated by spaces
     // (e.g. "-trace enable=ipod_touch_multitouch_log").
@@ -276,6 +287,8 @@ void Worker::SendStatusIfChanged() {
         return;
     lastStatus_ = key;
     Send({{"event", "status"}, {"state", state}, {"sleeping", sleeping}, {"agent", agent}});
+    if (agent == 1 && webProxy_)
+        TrustWebProxy();   // the guest tools are up: iOS can be told to trust the proxy
 }
 
 void Worker::AudioThread() {
@@ -390,7 +403,14 @@ void Worker::HandleCommand(const Json &command) {
     } else if (cmd == "mute") {
         muted_ = command.value("muted", false);
     } else if (cmd == "internet" && ready) {
-        engine_->netRestrict("wifi0", !command.value("on", false));
+        internet_ = command.value("on", false);
+        engine_->netRestrict("wifi0", !internet_);
+        UpdateWebProxy();
+    } else if (cmd == "webproxy") {
+        webProxy_ = command.value("on", false);
+        UpdateWebProxy();
+        if (webProxy_ && ready && engine_->agentStatus() == 1)
+            TrustWebProxy();
     } else if (cmd == "type") {
         Background([this, command] {
             AgentReply reply = Agent("type", "", command.value("text", ""));
@@ -505,6 +525,57 @@ void Worker::Shutdown() {
     engine_->quit();
 }
 
+// The web proxy listens before iOS boots; the engine forwards the guest's 10.0.2.100:3128 to it.
+// Its identity is kept per device in <data>\network\<id> (as LightTouch keeps it).
+void Worker::StartWebProxy(BootOptions &options) {
+    try {
+        proxy_ = std::make_unique<WebProxy>(DataDir() / "network" / device_.id);
+        const fs::path socket = fs::temp_directory_path() / ("ios-emulator-" + device_.id.substr(0, 8) + "-" +
+                                                             std::to_string(GetCurrentProcessId()) + ".sock");
+        proxy_->Listen(socket);
+        options.proxySocket = socket;
+        UpdateWebProxy();
+    } catch (const std::exception &e) {
+        // Without it, iOS waits out a timeout on every new connection before going direct.
+        proxy_.reset();
+        Log("The web proxy didn't start: %s", e.what());
+        Send({{"event", "proxy"}, {"status", std::string("The web proxy didn't start: ") + e.what()}, {"error", true}});
+    }
+}
+
+void Worker::UpdateWebProxy() {
+    if (proxy_)
+        proxy_->SetMode(!internet_ ? WebProxy::Mode::Off : webProxy_ ? WebProxy::Mode::Bridge : WebProxy::Mode::Direct);
+}
+
+// Installs the proxy's certificate in iOS's trust store, so iOS accepts the HTTPS connections the
+// proxy re-encrypts. Uses the guest-tools helper ittrust (from LightTouch), copied in each time:
+// the trust store keeps the certificate, but a newer helper may have been bundled since.
+void Worker::TrustWebProxy() {
+    if (!proxy_ || trusting_.exchange(true))
+        return;
+    Background([this] {
+        const std::string helper = "/private/var/tmp/ios-emulator-ittrust";
+        const std::string certificate = "/private/var/tmp/ios-emulator-proxy.der";
+        Send({{"event", "proxy"}, {"status", "Installing the web proxy's certificate in iOS"}, {"error", false}});
+        AgentReply reply = Agent("put", helper + " 755", LoadFile(ResourcesDir() / "guest-tools" / "ittrust"));
+        if (reply.status == 0)
+            reply = Agent("put", certificate + " 644", proxy_->Certificate());
+        if (reply.status == 0)   // spawn takes argv as NUL-separated words
+            reply = Agent("spawn", "", helper + '\0' + "add" + '\0' + certificate + '\0');
+        const bool trusted = reply.status == 0 && reply.body.find("Guest trust add: 0") != std::string::npos;
+        if (trusted) {
+            Log("iOS trusts the web proxy's certificate");
+        } else {
+            trusting_ = false;   // try again the next time the proxy is switched on
+            Log("Installing the web proxy's certificate failed (guest status %d): %s", reply.status, reply.body.c_str());
+        }
+        Send({{"event", "proxy"},
+              {"status", trusted ? "Ready: iOS trusts the web proxy" : "iOS didn't accept the web proxy's certificate"},
+              {"error", !trusted}});
+    });
+}
+
 Worker::AgentReply Worker::Agent(const std::string &op, const std::string &argument, const std::string &body,
                                  std::chrono::milliseconds timeout) {
     std::lock_guard<std::mutex> lock(agentMutex_);
@@ -540,7 +611,7 @@ Worker::AgentReply Worker::Agent(const std::string &op, const std::string &argum
 int RunWorker(const std::vector<std::string> &args) {
     std::string deviceDir, framesName;
     HANDLE events = nullptr;
-    bool internet = false, headphones = false, muted = false;
+    bool internet = false, webProxy = false, headphones = false, muted = false;
     for (size_t i = 0; i < args.size(); i++) {
         const std::string &arg = args[i];
         const bool hasValue = i + 1 < args.size();
@@ -552,17 +623,21 @@ int RunWorker(const std::vector<std::string> &args) {
             events = reinterpret_cast<HANDLE>(uintptr_t(std::stoull(args[++i])));
         else if (arg == "--internet")
             internet = true;
+        else if (arg == "--web-proxy")
+            webProxy = true;
         else if (arg == "--headphones")
             headphones = true;
         else if (arg == "--muted")
             muted = true;
     }
     if (deviceDir.empty() || framesName.empty() || !events) {
-        Log("usage: iOS-Emulator --worker --device <dir> --frames <name> --events <handle> [--internet]");
+        Log("usage: iOS-Emulator --worker --device <dir> --frames <name> --events <handle> [--internet] "
+            "[--web-proxy] [--headphones] [--muted]");
         return 64;
     }
     try {
-        Worker worker(OpenDevice(fs::path(Widen(deviceDir))), framesName, events, internet, headphones, muted);
+        Worker worker(OpenDevice(fs::path(Widen(deviceDir))), framesName, events, internet, webProxy, headphones,
+                      muted);
         return worker.Run();
     } catch (const std::exception &e) {
         Log("Worker failed: %s", e.what());

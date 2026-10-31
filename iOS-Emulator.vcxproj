@@ -47,15 +47,15 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(ProjectDir)third_party\imgui;$(ProjectDir)third_party\libimobiledevice\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)third_party\imgui;$(ProjectDir)third_party\libimobiledevice\include;$(ProjectDir)third_party\openssl\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>opengl32.lib;winhttp.lib;winmm.lib;ws2_32.lib;bcrypt.lib;shell32.lib;comdlg32.lib;delayimp.lib;libimobiledevice-1.0.lib;libplist-2.0.lib;libusbmuxd-2.0.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>$(ProjectDir)third_party\libimobiledevice\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <!-- The USB libraries live in resources\ and load on first use (main.cpp points the DLL search there). -->
-      <DelayLoadDLLs>libimobiledevice-1.0.dll;libplist-2.0.dll;libusbmuxd-2.0.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+      <AdditionalDependencies>opengl32.lib;winhttp.lib;winmm.lib;ws2_32.lib;bcrypt.lib;shell32.lib;comdlg32.lib;delayimp.lib;libimobiledevice-1.0.lib;libplist-2.0.lib;libusbmuxd-2.0.lib;libssl-3-x64.lib;libcrypto-3-x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)third_party\libimobiledevice\lib;$(ProjectDir)third_party\openssl\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <!-- The USB and OpenSSL libraries live in resources\ and load on first use (main.cpp points the DLL search there). -->
+      <DelayLoadDLLs>libimobiledevice-1.0.dll;libplist-2.0.dll;libusbmuxd-2.0.dll;libssl-3-x64.dll;libcrypto-3-x64.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
     <Manifest>
       <AdditionalManifestFiles>$(ProjectDir)src\app.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>
@@ -79,6 +79,7 @@
     <ClCompile Include="src\firmware.cpp" />
     <ClCompile Include="src\library.cpp" />
     <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\proxy.cpp" />
     <ClCompile Include="src\services.cpp" />
     <ClCompile Include="src\session.cpp" />
     <ClCompile Include="src\ui.cpp" />
@@ -96,6 +97,7 @@
     <ClInclude Include="src\engine.h" />
     <ClInclude Include="src\firmware.h" />
     <ClInclude Include="src\library.h" />
+    <ClInclude Include="src\proxy.h" />
     <ClInclude Include="src\services.h" />
     <ClInclude Include="src\session.h" />
     <ClInclude Include="src\ui.h" />

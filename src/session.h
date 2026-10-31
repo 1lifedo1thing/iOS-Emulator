@@ -18,6 +18,7 @@
 
 struct SessionOptions {
     bool internet = false;
+    bool webProxy = true;     // HTTPS through the web proxy's bridge (proxy.h)
     bool headphones = false;
     bool muted = false;
 };
@@ -53,7 +54,9 @@ public:
     int screenWidth = 320, screenHeight = 480;
     uint64_t capabilities = 0;        // QEMU_IOS_CAP_* bits
     std::string machine;
-    bool paused = false, muted = false, internet = false;
+    bool paused = false, muted = false, internet = false, webProxy = true;
+    std::string proxyStatus;          // how setting up the web proxy went (the latest "proxy" event)
+    bool proxyError = false;
 
     bool Exited() const { return exited_; }
     bool ExitedCleanly() const { return exitClean_; }

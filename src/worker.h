@@ -4,7 +4,8 @@
 //   - copies every new screen frame into the shared memory the UI created (common.h, SharedFrame);
 //   - plays the guest's sound;
 //   - reads commands from stdin and writes events to a pipe, one JSON object per line;
-//   - hosts the USB developer services (services.h) for this device.
+//   - hosts the USB developer services (services.h) for this device;
+//   - runs the device's web proxy (proxy.h) and installs its certificate in iOS.
 //
 // Commands (UI -> worker), each a JSON object with a "cmd" field:
 //   {"cmd":"touch","contacts":[{"id":1,"phase":0,"x":0.5,"y":0.5}]}   phase: 0 down, 1 move, 2 up, 3 cancel
@@ -12,6 +13,7 @@
 //   {"cmd":"motion","x":0,"y":0,"z":9.8}                              accelerometer, m/s^2, portrait axes
 //   {"cmd":"type","text":"hello"}                                     types text through the guest agent
 //   {"cmd":"pause","paused":true}   {"cmd":"mute","muted":true}   {"cmd":"internet","on":true}
+//   {"cmd":"webproxy","on":true}                                      HTTPS through the web proxy's bridge
 //   {"cmd":"stop"}                                                    shuts iOS down cleanly, then exits
 //   Developer requests carry an "id" and get {"event":"reply","id":..,"ok":..,"result"|"error":..} back:
 //     {"cmd":"info"}                                         what lockdown reports about the device
@@ -29,11 +31,13 @@
 //   reply   {id, ok, error?, result?}                     the answer to a developer request
 //   progress {id, text}                                   how a long request (an app install) is going
 //   log     {line}                                        a system log line, while capturing
+//   proxy   {status, error}                               setting up the web proxy (its certificate in iOS)
 //   exit    {clean, message}                              last line before the worker exits
 #pragma once
 
 #include "common.h"
 
 // Runs a worker with the arguments after "--worker". Returns the process exit code.
-//   --device <dir>  --frames <mapping name>  --events <pipe handle>  [--internet] [--headphones] [--muted]
+//   --device <dir>  --frames <mapping name>  --events <pipe handle>
+//   [--internet] [--web-proxy] [--headphones] [--muted]
 int RunWorker(const std::vector<std::string> &args);
