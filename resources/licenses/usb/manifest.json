@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "source_reference": "https://github.com/blake-lucas/LightTouch",
+  "files": [
+    {
+      "path": "gcc-mingw-w64-base.txt",
+      "sha256": "a481f772f7a53335f13b32c6c54eb1c8577ce97704edd3757ab7ed4287a8e96a"
+    },
+    {
+      "path": "libimobiledevice/COPYING",
+      "sha256": "7619c753cac95d4740220223bde48a032606fcaccde5e546f9bc444c81ab356d"
+    },
+    {
+      "path": "libimobiledevice/COPYING.LESSER",
+      "sha256": "e237fa56668030e928551ddd60f05df5fe957f75eab874bbd017e085ed722e7c"
+    },
+    {
+      "path": "libimobiledevice-COPYING.LESSER",
+      "sha256": "e237fa56668030e928551ddd60f05df5fe957f75eab874bbd017e085ed722e7c"
+    },
+    {
+      "path": "libimobiledevice-glue/COPYING",
+      "sha256": "e237fa56668030e928551ddd60f05df5fe957f75eab874bbd017e085ed722e7c"
+    },
+    {
+      "path": "libplist/AUTHORS",
+      "sha256": "9ee5828311bc47160791e9fc1574cb356d9d6a661b1d194a97cd254d58c9d3b9"
+    },
+    {
+      "path": "libplist/COPYING",
+      "sha256": "7619c753cac95d4740220223bde48a032606fcaccde5e546f9bc444c81ab356d"
+    },
+    {
+      "path": "libplist/COPYING.LESSER",
+      "sha256": "e237fa56668030e928551ddd60f05df5fe957f75eab874bbd017e085ed722e7c"
+    },
+    {
+      "path": "libusbmuxd/COPYING",
+      "sha256": "e237fa56668030e928551ddd60f05df5fe957f75eab874bbd017e085ed722e7c"
+    },
+    {
+      "path": "mingw-w64-common.txt",
+      "sha256": "af23297b7d17e8e31817a5d58088de6fdafe34705bb5a7d1d330f08711b31314"
+    },
+    {
+      "path": "openssl/LICENSE",
+      "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+    },
+    {
+      "path": "usbmuxd/COPYING.GPLv2",
+      "sha256": "7619c753cac95d4740220223bde48a032606fcaccde5e546f9bc444c81ab356d"
+    },
+    {
+      "path": "usbmuxd/COPYING.GPLv3",
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+firmwarekit (crates/lighttouch-firmware in LightTouch's source) prepares an emulated device from an IPSW. It is written in Rust and links, statically:
+
+- the Rust standard library (MIT or Apache-2.0);
+- the crates whose licences follow, as <crate>-<version>-<file>; rusqlite's libsqlite3-sys compiles in SQLite (public domain, https://sqlite.org/copyright.html);
+- iBoot32Patcher (LukeZGD's fork, GPL-3.0-or-later: iBoot32Patcher-LICENSE), which patches the iPad's iBoot. With it, firmwarekit as distributed is a combined work under the GNU GPL version 3 or later; LightTouch's own code in it is GPL-2.0-or-later (LightTouch-LICENSE). The source is at the reference in manifest.json;
+- LightTouch's activation.c (GPL-2.0-or-later).

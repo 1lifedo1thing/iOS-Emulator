@@ -1,0 +1,7 @@
+The LightTouch desktop app (crates/lighttouch in LightTouch's source) is written in Rust and is GPL-2.0-or-later (LightTouch-LICENSE). It links, statically:
+
+- the Rust standard library (MIT or Apache-2.0);
+- the crates whose licences follow, as <crate>-<version>-<file>; on Windows the openssl-src crate compiles in OpenSSL (Apache-2.0);
+- LightTouch's shared C++ core (Portable/, GPL-2.0-or-later).
+
+The source is at the reference in manifest.json. The engine, firmwarekit and the USB helper have their own notices.

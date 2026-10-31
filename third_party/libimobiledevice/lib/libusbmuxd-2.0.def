@@ -1,0 +1,23 @@
+LIBRARY libusbmuxd-2.0.dll
+EXPORTS
+    libusbmuxd_set_debug_level
+    libusbmuxd_set_use_inotify
+    libusbmuxd_version
+    usbmuxd_connect
+    usbmuxd_delete_pair_record
+    usbmuxd_device_list_free
+    usbmuxd_disconnect
+    usbmuxd_events_subscribe
+    usbmuxd_events_unsubscribe
+    usbmuxd_get_device
+    usbmuxd_get_device_by_udid
+    usbmuxd_get_device_list
+    usbmuxd_read_buid
+    usbmuxd_read_pair_record
+    usbmuxd_recv
+    usbmuxd_recv_timeout
+    usbmuxd_save_pair_record
+    usbmuxd_save_pair_record_with_device_id
+    usbmuxd_send
+    usbmuxd_subscribe
+    usbmuxd_unsubscribe
