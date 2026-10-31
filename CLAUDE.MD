@@ -28,6 +28,19 @@ build\Release\iOS-Emulator.exe
 - The exe finds `resources/` next to itself or in a parent folder, so it runs straight from `build\<Config>`.
 - `init.bat` puts the bundled Portable Git (`PortableGit-2.55.0.5-64-bit.7z/`, a folder despite the name) on PATH for one console.
 
+### Rebuilding `resources/firmwarekit.exe`
+
+It is built from `EXTERNAL/LightTouch-main` with a portable Rust (`EXTERNAL/rust/toolchain`) and MinGW GCC (`EXTERNAL/rust/mingw`), installed only inside the project (no installer, PATH or registry changes). Its C sources need GCC, so the target is `x86_64-pc-windows-gnu`, not MSVC. From Git Bash, in `EXTERNAL/LightTouch-main/LightTouch-main`:
+
+```
+R=<project>/EXTERNAL/rust
+export CARGO_HOME=$R/cargo-home CARGO_TARGET_DIR=$R/target PATH="$R/mingw/bin:$R/toolchain/bin:$PATH" \
+       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=gcc CC_x86_64_pc_windows_gnu=gcc AR_x86_64_pc_windows_gnu=ar
+cargo build --release --target x86_64-pc-windows-gnu -p lighttouch-firmware --bin firmwarekit
+```
+
+Then copy `$R/target/x86_64-pc-windows-gnu/release/firmwarekit.exe` to `resources/`. Devices keep the kernel they were prepared with, so a firmwarekit fix reaches only newly prepared devices.
+
 ### Testing
 
 The headless command-line modes are the test harness (`src/main.cpp` documents them):
