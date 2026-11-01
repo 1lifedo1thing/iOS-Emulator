@@ -20,6 +20,7 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -37,6 +38,9 @@ public:
     // Queues text (UTF-8) to type. '\n' taps Return and '\b' taps Delete (a backspace).
     void Type(const std::string &text);
 
+    // Someone else touched the screen (the mouse): the keyboard may have changed.
+    void Touched();
+
     // What it reads off a screen frame (BGRA): where the keyboard is, its keys, page and Shift.
     // For tests ("iOS-Emulator --keyboard shot.png").
     static std::string Describe(const uint8_t *bgra, int width, int height, int stride);
@@ -44,11 +48,13 @@ public:
     struct Layout;   // a keyboard read off the screen (keyboard.cpp)
 
 private:
+    struct Memory;   // what typing knows of the keyboard, kept between bursts (keyboard.cpp)
+
     static bool Read(Layout &layout, const uint8_t *bgra, int width, int height, int stride);
     bool Stopping();
     void Run();
     void TypeText(const std::string &text);
-    bool ReadKeyboard(Layout &layout);
+    bool ReadKeyboard(Layout &layout, std::chrono::milliseconds quiet);
     void Tap(const Layout &layout, int row, int key);
 
     Engine &engine_;
@@ -59,10 +65,12 @@ private:
     int width_ = 0, height_ = 0, stride_ = 0;
     uint64_t serial_ = 0;
     uint64_t lastTouch_ = 0;        // the engine's id for the last touch batch sent
+    std::unique_ptr<Memory> memory_;
 
     std::mutex mutex_;
     std::condition_variable wake_;
     std::deque<std::string> queue_;
     bool stop_ = false;
+    bool touched_ = false;          // see Touched()
     std::thread thread_;   // declared last: it starts once everything above is set up
 };

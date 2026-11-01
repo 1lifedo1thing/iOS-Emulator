@@ -401,9 +401,12 @@ void Worker::HandleCommand(const Json &command) {
             contacts.push_back(contact);
         }
         Touch(contacts);
+        keyboard_->Touched();   // a touch, a button or a turn may change the keyboard in iOS
     } else if (cmd == "button" && ready) {
         engine_->button(command.at("button").get<int>(), command.at("down").get<bool>());
+        keyboard_->Touched();
     } else if (cmd == "motion" && ready) {
+        keyboard_->Touched();
         QemuIosPortableMotion motion{};
         motion.size = sizeof motion;
         motion.version = 1;

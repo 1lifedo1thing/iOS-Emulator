@@ -1,6 +1,7 @@
 #include "keyboard.h"
 
 #include <array>
+#include <cctype>
 #include <string_view>
 
 using namespace std::chrono_literals;
@@ -87,16 +88,26 @@ bool FindTarget(char c, const Design &design, Page showing, Target &target) {
 }
 
 // How long a tap holds the key down, and how long to wait after it before the next one.
-constexpr auto kHold = 50ms;
-constexpr auto kGap = 90ms;
+constexpr auto kHold = 40ms;
+constexpr auto kGap = 60ms;
 // Before reading the keyboard, the guest must have received every tap sent (it can lag well
 // behind), and then the screen must have stopped changing for kQuiet (the key pressed has been
-// drawn, a page has switched), or kSettleLimit must have passed. A read that finds no keyboard is
-// tried again until kFindLimit has passed (a key's popup can still be covering a row).
+// drawn, and iOS has turned Shift on after a Return, say), or kSettleLimit must have passed. A
+// read that finds no keyboard is tried again until kFindLimit has passed (a key's popup can still
+// be covering a row). After a page key, reads are quicker (kPageQuiet) but repeat until the page
+// tapped for shows, up to kSettleLimit.
 constexpr auto kDeliveryLimit = 5s;
 constexpr auto kQuiet = 200ms;
+constexpr auto kPageQuiet = 60ms;
 constexpr auto kSettleLimit = 1500ms;
 constexpr auto kFindLimit = 4s;
+// What was learned about the keyboard is kept from one burst of typing to the next (keystrokes
+// sent one by one) for this long, unless the screen was touched in between.
+constexpr auto kRememberFor = 3s;
+
+// Symbols after which iOS keeps the numbers or symbols page up (after ' and some punctuation it
+// goes back to letters by itself).
+constexpr std::string_view kStayOnPage = "0123456789-/:;()$&@[]{}#%^*+=_\\|~<>";
 // A key stands out from the keyboard's background by more than this, in luminance (0 to 255).
 constexpr int kContrast = 20;
 
@@ -289,9 +300,20 @@ bool OnScreenKeyboard::Layout::Find() {
 
 // ---- Typing ----------------------------------------------------------------------------------
 
+// What typing knows of the keyboard, kept from one burst to the next (see kRememberFor).
+struct OnScreenKeyboard::Memory {
+    Layout layout;
+    bool current = false;   // `layout` still matches the screen
+    // Which page shows. The screen tells letters from the rest; numbers and symbols look alike, so
+    // which of those shows is known only from the page keys tapped here.
+    Page page = kUnknown;
+    char last = 0;          // the last character typed
+    std::chrono::steady_clock::time_point at;   // when the last burst ended
+};
+
 OnScreenKeyboard::OnScreenKeyboard(Engine &engine, Touch touch, Problem problem)
     : engine_(engine), touch_(std::move(touch)), problem_(std::move(problem)), pixels_(SharedFrame::kPixelBytes),
-      thread_(&OnScreenKeyboard::Run, this) {}
+      memory_(std::make_unique<Memory>()), thread_(&OnScreenKeyboard::Run, this) {}
 
 OnScreenKeyboard::~OnScreenKeyboard() {
     {
@@ -306,6 +328,11 @@ void OnScreenKeyboard::Type(const std::string &text) {
     std::lock_guard<std::mutex> lock(mutex_);
     queue_.push_back(text);
     wake_.notify_one();
+}
+
+void OnScreenKeyboard::Touched() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    touched_ = true;
 }
 
 // The worker is going away, or the device has stopped: typing ends.
@@ -335,9 +362,9 @@ void OnScreenKeyboard::Run() {
     }
 }
 
-// Waits until the guest has the taps sent and its screen has settled (see kQuiet), then reads
-// the keyboard off the screen.
-bool OnScreenKeyboard::ReadKeyboard(Layout &layout) {
+// Waits until the guest has the taps sent and its screen has stopped changing for `quiet`, then
+// reads the keyboard off the screen.
+bool OnScreenKeyboard::ReadKeyboard(Layout &layout, std::chrono::milliseconds quiet) {
     using Clock = std::chrono::steady_clock;
     const auto delivered = Clock::now() + kDeliveryLimit;
     while (lastTouch_ && engine_.inputStatus(lastTouch_) == QEMU_IOS_QUEUED && Clock::now() < delivered &&
@@ -360,7 +387,7 @@ bool OnScreenKeyboard::ReadKeyboard(Layout &layout) {
                 height_ = int(meta.height);
                 stride_ = int(meta.stride);
                 changed = now;
-            } else if (width_ > 0 && (now - changed >= kQuiet || now >= settled)) {
+            } else if (width_ > 0 && (now - changed >= quiet || now >= settled)) {
                 break;
             }
             std::this_thread::sleep_for(15ms);
@@ -429,19 +456,36 @@ void OnScreenKeyboard::Tap(const Layout &layout, int row, int key) {
     std::this_thread::sleep_for(kGap);
 }
 
-// Types one burst of text. The keyboard is read again whenever a tap may have changed it (the
-// page, Shift turned on by iOS after a space, the keyboard closed by Return). Between letters it
-// can't change, so those go in quickly.
+// Types one burst of text. The keyboard is read again whenever a tap may have changed it in a way
+// that can't be told in advance (Shift turned on by iOS after ". ", the page switched back by iOS,
+// the keyboard closed by Return). Taps whose effect is certain (letters, digits, a space after a
+// word) go in one after the other.
 void OnScreenKeyboard::TypeText(const std::string &text) {
     const auto started = std::chrono::steady_clock::now();
-    Layout layout;
-    bool current = false;   // `layout` still matches the screen
-    // Which page shows. The screen tells letters from the rest; numbers and symbols look alike, so
-    // which of those shows is known only from the page keys tapped here.
-    Page page = kUnknown;
+    Memory &memory = *memory_;
+    Layout &layout = memory.layout;
+    bool &current = memory.current;
+    Page &page = memory.page;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (touched_ || started - memory.at > kRememberFor) {   // the keyboard may have changed since
+            current = false;
+            page = kUnknown;
+            memory.last = 0;
+        }
+        touched_ = false;
+    }
     int skipped = 0;
-    auto read = [&] {
-        if (!ReadKeyboard(layout)) {
+    // Reads the keyboard. After a page key, `letters` says whether the letters page is the one
+    // tapped for (1) or not (0), and reads repeat, quickly, until it shows.
+    auto read = [&](int letters = -1) {
+        const auto until = std::chrono::steady_clock::now() + kSettleLimit;
+        bool found;
+        while ((found = ReadKeyboard(layout, letters < 0 ? kQuiet : kPageQuiet)) && letters >= 0 &&
+               layout.letters != bool(letters) && std::chrono::steady_clock::now() < until && !Stopping()) {
+        }
+        if (!found) {
+            current = false;
             if (Stopping())
                 return false;
             // The screen it couldn't read, to check with "iOS-Emulator --keyboard".
@@ -483,20 +527,24 @@ void OnScreenKeyboard::TypeText(const std::string &text) {
         // symbols (or not knowing which) back to letters.
         for (int step = 0; target.page != kAnyPage && page != target.page; step++) {
             if (step == 4) {
+                current = false;
                 problem_("The keyboard in iOS didn't change pages as expected, so typing stopped.");
                 return;
             }
+            int letters = -1;   // numbers and symbols look alike: no page to wait for
             if (page == kLetters) {
                 Tap(layout, 3, 0);   // .?123
                 page = kNumbers;
+                letters = 0;
             } else if (page == kUnknown || target.page == kLetters) {
                 Tap(layout, 3, 0);   // ABC
                 page = kLetters;
+                letters = 1;
             } else {
                 Tap(layout, 2, 0);   // #+= or 123
                 page = page == kNumbers ? kSymbols : kNumbers;
             }
-            if (!read())
+            if (!read(letters))
                 return;
         }
 
@@ -505,19 +553,31 @@ void OnScreenKeyboard::TypeText(const std::string &text) {
             skipped++;   // e.g. a space on the web address keyboard, which has no Space key
             continue;
         }
-        if (target.page == kLetters && layout.shift != target.shift) {
+        const bool tapShift = target.page == kLetters && layout.shift != target.shift;
+        if (tapShift) {
             Tap(layout, 2, 0);
             layout.shift = target.shift;
         }
         Tap(layout, target.row, key);
-        // After a lowercase letter, Shift stays off and the page unchanged. Anything else may change
-        // the keyboard: after a capital, Shift is usually off again, but not always (two Shift taps
-        // that reach a lagging guest close together lock it on).
-        if (target.page != kLetters || target.shift)
+
+        // What the keyboard is now, where that's certain; otherwise it's read again.
+        if (target.page == kLetters) {
+            // A letter turns Shift off. But a Shift tapped close after another can reach a lagging
+            // guest as a double tap, which locks it on: check after those.
+            layout.shift = false;
+            if (tapShift && target.shift)
+                current = false;
+        } else if (c == ' ' && page == kLetters && std::isalnum(uint8_t(memory.last))) {
+            // A space after a word changes nothing (after ". ", a Return or a second space, iOS
+            // turns Shift on).
+        } else if (target.page == kAnyPage || kStayOnPage.find(c) == std::string_view::npos) {
             current = false;
+        }
+        memory.last = c;
     }
+    memory.at = std::chrono::steady_clock::now();
     Log("Typed %zu characters in %.1f s", text.size(),
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
+        std::chrono::duration<double>(memory.at - started).count());
     if (skipped)
         problem_(std::to_string(skipped) + " character(s) have no key on the keyboard in iOS and weren't typed.");
 }
