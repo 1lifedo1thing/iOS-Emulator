@@ -177,4 +177,4 @@ The licenses of the bundled components are in `resources\licenses` and `third_pa
 Like LightTouch, this program is free software under the GNU GPL, version 2 or (at your option) any
 later version: see `LICENSE`.
 
-iPhone, iPod touch, iPad and iOS are trademarks of Apple Inc. This project is not affiliated with Apple, nor does it distribute Apple's proprietary software, firmware, or source code.
+iPhone, iPod touch, and iPad are trademarks of Apple Inc. iOS is a trademark or registered trademark of Cisco in the U.S. and other countries and is used by Apple under license. This project is not affiliated with Apple, nor does it distribute Apple's proprietary software, firmware, or source code.
