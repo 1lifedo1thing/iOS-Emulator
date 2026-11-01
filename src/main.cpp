@@ -5,14 +5,15 @@
 //   iOS-Emulator.exe                       the app window
 //   iOS-Emulator.exe --list                lists the devices in the library
 //   iOS-Emulator.exe --run <device> [--seconds N] [--screenshot file.png] [--internet] [--no-web-proxy]
-//                    [--keyboard] [--tap x,y,t ...] [--swipe x,y,toX,toY,t[,seconds] ...]
-//                    [--request t json ...] [--send t json ...]
+//                    [--tap x,y,t ...] [--swipe x,y,toX,toY,t[,seconds] ...]
+//                    [--request t json ...] [--send t json ...] [--shot t file.png ...]
 //                                          boots a device without a window (for testing and scripts);
 //                                          --no-web-proxy lets iOS connect to websites itself (proxy.h);
-//                                          --keyboard keeps the USB keyboard plugged in (boards with a USB host);
 //                                          --tap/--swipe touch the screen (coordinates 0..1) t seconds after start;
 //                                          --request sends a developer command (worker.h) and prints the reply;
-//                                          --send sends any other command (e.g. {"cmd":"type","text":"hi"})
+//                                          --send sends any other command (e.g. {"cmd":"type","text":"hi"});
+//                                          --shot saves the screen t seconds after start
+//   iOS-Emulator.exe --keyboard shot.png   prints what typing reads off a screenshot (keyboard.h)
 //   iOS-Emulator.exe --catalog [product]   lists the firmwares that can be prepared
 //   iOS-Emulator.exe --prepare <firmware id> [--name N] [--jailbreak] [--ipsw file]
 //                                          prepares a new device (e.g. --prepare n18ap-8C148 --jailbreak)
@@ -20,6 +21,7 @@
 //   iOS-Emulator.exe --worker ...          internal: runs one device (started by the app)
 #include "common.h"
 #include "firmware.h"
+#include "keyboard.h"
 #include "library.h"
 #include "session.h"
 #include "ui.h"
@@ -69,9 +71,15 @@ static int RunCommand(const std::vector<std::string> &args) {
         Json json;
         bool request;
     };
-    std::string name, screenshot;
+    // A screenshot to save `at` seconds after the start.
+    struct Shot {
+        double at;
+        std::string file;
+    };
+    std::string name, screenshot, typingProblem;
     std::vector<Gesture> gestures;
     std::vector<Command> commands;
+    std::vector<Shot> shots;
     int seconds = 60;
     SessionOptions options;
     for (size_t i = 0; i < args.size(); i++) {
@@ -85,9 +93,10 @@ static int RunCommand(const std::vector<std::string> &args) {
             const bool request = args[i] == "--request";
             const double at = atof(args[++i].c_str());
             commands.push_back({at, Json::parse(args[++i]), request});
-        } else if (args[i] == "--keyboard")
-            options.keyboard = true;
-        else if (args[i] == "--seconds" && i + 1 < args.size())
+        } else if (args[i] == "--shot" && i + 2 < args.size()) {
+            const double at = atof(args[++i].c_str());
+            shots.push_back({at, args[++i]});
+        } else if (args[i] == "--seconds" && i + 1 < args.size())
             seconds = std::stoi(args[++i]);
         else if (args[i] == "--screenshot" && i + 1 < args.size())
             screenshot = args[++i];
@@ -146,6 +155,19 @@ static int RunCommand(const std::vector<std::string> &args) {
             else
                 session.Send(it->json);
             it = commands.erase(it);
+        }
+        for (auto it = shots.begin(); it != shots.end();) {
+            if (elapsed < it->at || session.FrameWidth() == 0) {
+                ++it;
+                continue;
+            }
+            WritePng(fs::path(Widen(it->file)), session.FramePixels().data(), session.FrameWidth(), session.FrameHeight());
+            Print("Saved " + it->file);
+            it = shots.erase(it);
+        }
+        if (session.typingProblem != typingProblem) {
+            typingProblem = session.typingProblem;
+            Print("Typing: " + typingProblem);
         }
         if (session.state != lastState) {
             lastState = session.state;
@@ -241,6 +263,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             return RunCommand(rest);
         if (mode == "--catalog")
             return CatalogCommand(rest);
+        if (mode == "--keyboard" && rest.size() == 1) {   // what typing reads off a screenshot
+            int width = 0, height = 0;
+            const std::vector<uint8_t> pixels = ReadImage(fs::path(Widen(rest[0])), width, height);
+            Print(OnScreenKeyboard::Describe(pixels.data(), width, height, width * 4));
+            return 0;
+        }
         if (mode == "--prepare")
             return PrepareCommand(rest);
         if (mode == "--import" && rest.size() == 1) {

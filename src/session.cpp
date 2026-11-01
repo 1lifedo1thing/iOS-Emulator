@@ -128,8 +128,6 @@ void Session::StartWorker(const SessionOptions &options) {
         launch.args.push_back(L"--headphones");
     if (options.muted)
         launch.args.push_back(L"--muted");
-    if (options.keyboard)
-        launch.args.push_back(L"--keyboard");
     // The engine and the USB libraries read these with getenv(), once, so they go in the
     // environment the worker starts with.
     launch.env = {
@@ -236,7 +234,6 @@ void Session::HandleEvent(const Json &event) {
         screenWidth = event.value("width", 320);
         screenHeight = event.value("height", 480);
         capabilities = event.value("capabilities", uint64_t(0));
-        usbKeyboard = event.value("usbKeyboard", false);
     } else if (kind == "status") {
         state = event.value("state", state);
         paused = state == "paused";
@@ -252,6 +249,8 @@ void Session::HandleEvent(const Json &event) {
     } else if (kind == "proxy") {
         proxyStatus = event.value("status", "");
         proxyError = event.value("error", false);
+    } else if (kind == "typing") {
+        typingProblem = event.value("message", "");
     } else if (kind == "progress") {
         progress = event.value("text", "");
     } else if (kind == "log") {

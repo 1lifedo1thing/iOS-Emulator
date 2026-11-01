@@ -1,6 +1,7 @@
 #include "worker.h"
 
 #include "engine.h"
+#include "keyboard.h"
 #include "library.h"
 #include "proxy.h"
 #include "services.h"
@@ -10,10 +11,8 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
-#include <map>
 #include <mutex>
 #include <sstream>
-#include <string_view>
 #include <thread>
 
 #pragma comment(lib, "winmm.lib")
@@ -21,7 +20,6 @@
 namespace {
 
 using namespace std::chrono_literals;
-using namespace std::string_view_literals;
 
 // ---- Sound -----------------------------------------------------------------------------------
 
@@ -85,156 +83,14 @@ private:
     std::vector<char> memory_[kBuffers];
 };
 
-// ---- Keyboard --------------------------------------------------------------------------------
-
-// The keys of a US keyboard, by the Mac virtual key code the engine takes (Carbon's kVK_ANSI_*):
-// the character at index n is what key n types, without and with Shift (\0: no such key).
-constexpr std::string_view kUsKeys = "asdfhgzxcv\0bqweryt123465=97-80]ou[ip\nlj'k;\\,/nm.\t `"sv;
-constexpr std::string_view kUsShiftedKeys = "ASDFHGZXCV\0BQWERYT!@#$^%+(&_*)}OU{IP\nLJ\"K:|<?NM>\t ~"sv;
-static_assert(kUsKeys.size() == 0x33 && kUsShiftedKeys.size() == 0x33);
-constexpr int kShiftKey = 0x38, kBackspaceKey = 0x33;
-const std::map<std::string, int> kNamedKeys = {
-    {"backspace", kBackspaceKey}, {"enter", 0x24}, {"tab", 0x30}, {"delete", 0x75}, {"home", 0x73},
-    {"end", 0x77},                {"left", 0x7b},  {"right", 0x7c}, {"down", 0x7d}, {"up", 0x7e},
-};
-
-// Key presses into iOS, through the engine's emulated keyboard. Where they land depends on the board:
-//   - boards with a USB host (the iPad): a USB keyboard plugged into the device's dock port once iOS
-//     is up. While it's plugged in, iOS hides its on-screen keyboard (as with a real keyboard), so
-//     it's plugged in only while wanted: all the time (KeepPluggedIn), or for a few seconds around
-//     each burst of typing;
-//   - the iPod touch 2G: the board's own key queue, which the guest tools' it_typein types from.
-// One thread sends the presses, paced: QEMU's USB keyboard queues only 16 key events, and hands iOS
-// one each time iOS polls it.
-class Keyboard {
-public:
-    Keyboard(Engine &engine, bool usb) : engine_(engine), usb_(usb), thread_(&Keyboard::Run, this) {}
-
-    ~Keyboard() {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            stop_ = true;
-        }
-        wake_.notify_one();
-        thread_.join();
-    }
-
-    bool Usb() const { return usb_; }
-
-    // Queues the presses that type `text` (UTF-8) on a US keyboard. Returns how many characters
-    // have no key there (they're skipped).
-    int Type(const std::string &text) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        int skipped = 0;
-        for (char c : text) {
-            if (uint8_t(c) >= 0x80) {   // part of a non-ASCII character: count each one once
-                skipped += (uint8_t(c) & 0xc0) != 0x80;
-                continue;
-            }
-            if (c == '\r')
-                continue;   // "\r\n" types one Return, for the '\n'
-            // The key that types it, and whether with Shift ('\0' would match the "no such key" places).
-            size_t key = c == '\b' ? kBackspaceKey : c ? kUsKeys.find(c) : std::string_view::npos;
-            bool shift = false;
-            if (key == std::string_view::npos && c) {
-                key = kUsShiftedKeys.find(c);
-                shift = key != std::string_view::npos;
-            }
-            if (key == std::string_view::npos) {
-                skipped++;
-                continue;
-            }
-            if (shift)
-                events_.push_back({kShiftKey, true});
-            events_.push_back({int(key), true});
-            events_.push_back({int(key), false});
-            if (shift)
-                events_.push_back({kShiftKey, false});
-        }
-        wake_.notify_one();
-        return skipped;
-    }
-
-    // Queues a press of a key by name (kNamedKeys). Returns false for a name it doesn't know.
-    bool Press(const std::string &name) {
-        auto found = kNamedKeys.find(name);
-        if (found == kNamedKeys.end())
-            return false;
-        std::lock_guard<std::mutex> lock(mutex_);
-        events_.push_back({found->second, true});
-        events_.push_back({found->second, false});
-        wake_.notify_one();
-        return true;
-    }
-
-    // USB boards: keep the keyboard plugged in, or plug it in only while typing.
-    void KeepPluggedIn(bool keep) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        keep_ = keep;
-        wake_.notify_one();
-    }
-
-private:
-    struct Event {
-        int key;
-        bool down;
-    };
-
-    static constexpr auto kPace = std::chrono::milliseconds(15);           // between two key events
-    static constexpr auto kFindKeyboard = std::chrono::milliseconds(2000);  // iOS finding a keyboard just plugged in
-    static constexpr auto kUnplugAfter = std::chrono::milliseconds(3000);   // unplugged this long after the last key
-
-    void Run() {
-        using Clock = std::chrono::steady_clock;
-        bool plugged = false;
-        Clock::time_point usableAt, unplugAt;
-        std::unique_lock<std::mutex> lock(mutex_);
-        while (!stop_) {
-            const bool typing = !events_.empty();
-            if (usb_) {
-                const auto now = Clock::now();
-                if (typing)
-                    unplugAt = now + kUnplugAfter;
-                const bool want = keep_ || typing || now < unplugAt;
-                // Plugged in only once iOS is up (its guest tools answer): a keyboard already there
-                // while the kernel starts its USB host can crash the boot.
-                const bool booted = engine_.ready() && engine_.agentStatus() == 1;
-                if (want != plugged && (booted || !want) && engine_.hardwareKeyboard(want)) {
-                    plugged = want;
-                    usableAt = now + kFindKeyboard;
-                    Log(plugged ? "Plugged in the USB keyboard" : "Unplugged the USB keyboard");
-                }
-            }
-            if (!typing || !engine_.ready() || (usb_ && (!plugged || Clock::now() < usableAt))) {
-                wake_.wait_for(lock, std::chrono::milliseconds(100));
-                continue;
-            }
-            const Event event = events_.front();
-            events_.pop_front();
-            lock.unlock();
-            engine_.keyMac(event.key, event.down);
-            std::this_thread::sleep_for(kPace);
-            lock.lock();
-        }
-    }
-
-    Engine &engine_;
-    const bool usb_;
-    std::mutex mutex_;
-    std::condition_variable wake_;
-    std::deque<Event> events_;
-    bool keep_ = false, stop_ = false;
-    std::thread thread_;   // declared last: it starts once everything above is set up
-};
-
 // ---- The worker ------------------------------------------------------------------------------
 
 class Worker {
 public:
     Worker(Device device, const std::string &framesName, HANDLE events, bool internet, bool webProxy, bool headphones,
-           bool muted, bool keyboard)
+           bool muted)
         : device_(std::move(device)), events_(events), internet_(internet), webProxy_(webProxy), headphones_(headphones),
-          muted_(muted), keepKeyboard_(keyboard) {
+          muted_(muted) {
         frames_.Open(framesName);
     }
 
@@ -259,6 +115,7 @@ private:
 
     void HandleCommand(const Json &command);
     void HandleDeveloperCommand(const Json &command);
+    uint64_t Touch(const std::vector<QemuIosPortableContact> &contacts);
     void PublishFrame();
     void SendStatusIfChanged();
     void Shutdown();
@@ -275,8 +132,6 @@ private:
     std::atomic<bool> internet_, webProxy_;
     bool headphones_;
     std::atomic<bool> muted_;
-    bool keepKeyboard_;                      // keep the USB keyboard plugged in from the start (Keyboard)
-    std::unique_ptr<Keyboard> keyboard_;     // after engine_: it's destroyed first
 
     std::mutex eventsMutex_;                 // one writer at a time on the events pipe
     std::atomic<bool> done_{false};          // qemu_ios_main returned
@@ -290,6 +145,7 @@ private:
     uint64_t frameSerial_ = 0;
     std::string lastStatus_;
 
+    std::mutex touchMutex_;                  // the mouse and the on-screen keyboard both touch
     uint64_t touchId_ = 0;                   // every touch batch gets a new, increasing id
     uint64_t motionTime_ = 0;
 
@@ -304,6 +160,10 @@ private:
 
     std::unique_ptr<WebProxy> proxy_;        // the guest's web proxy (proxy.h); null if it couldn't start
     std::atomic<bool> trusting_{false};      // its certificate is installed in iOS, or being installed
+
+    // Types by tapping iOS's on-screen keyboard (keyboard.h). Declared last, so it's destroyed
+    // first: its thread touches through this worker.
+    std::unique_ptr<OnScreenKeyboard> keyboard_;
 };
 
 void Worker::Send(const Json &event) {
@@ -329,15 +189,27 @@ void Worker::Background(std::function<void()> task) {
 int Worker::Run() {
     engine_ = std::make_unique<Engine>(ResourcesDir() / "libqemu-arm.dll");
     QemuIosPortableBoard board = engine_->FindBoard(device_.board);
-    const QemuIosDeviceInfo *info = engine_->deviceInfo(board.machine);
-    keyboard_ = std::make_unique<Keyboard>(*engine_, info && info->has_usb_host);
-    keyboard_->KeepPluggedIn(keepKeyboard_);
+    keyboard_ = std::make_unique<OnScreenKeyboard>(
+        *engine_,
+        [this](double x, double y, int phase) {
+            QemuIosPortableContact contact{};
+            contact.size = sizeof contact;
+            contact.version = 1;
+            contact.contact_id = 9;   // a finger of its own, apart from the mouse's (1 and 2)
+            contact.phase = uint32_t(phase);
+            contact.x = x;
+            contact.y = y;
+            return Touch({contact});
+        },
+        [this](const std::string &message) {
+            Log("Typing: %s", message.c_str());
+            Send({{"event", "typing"}, {"message", message}});
+        });
     Send({{"event", "board"},
           {"machine", board.machine},
           {"width", board.width},
           {"height", board.height},
-          {"capabilities", board.capabilities},
-          {"usbKeyboard", keyboard_->Usb()}});
+          {"capabilities", board.capabilities}});
 
     BootOptions options;
     options.machine = board.machine;
@@ -528,14 +400,7 @@ void Worker::HandleCommand(const Json &command) {
             contact.y = std::clamp(c.at("y").get<double>(), 0.0, 1.0);
             contacts.push_back(contact);
         }
-        if (touchId_) {   // how the previous batch ended (the engine applies them asynchronously)
-            const int previous = engine_->inputStatus(touchId_);
-            if (previous != QEMU_IOS_OK && previous != QEMU_IOS_QUEUED)
-                Log("Touch batch %llu ended with %d", (unsigned long long)touchId_, previous);
-        }
-        const int result = engine_->touch(++touchId_, NowNs(), contacts.data(), contacts.size());
-        if (result != QEMU_IOS_QUEUED && result != QEMU_IOS_OK)
-            Log("The engine refused a touch (phase %u): %d", contacts.empty() ? 0 : contacts[0].phase, result);
+        Touch(contacts);
     } else if (cmd == "button" && ready) {
         engine_->button(command.at("button").get<int>(), command.at("down").get<bool>());
     } else if (cmd == "motion" && ready) {
@@ -562,26 +427,28 @@ void Worker::HandleCommand(const Json &command) {
         UpdateWebProxy();
         if (webProxy_ && ready && engine_->agentStatus() == 1)
             TrustWebProxy();
-    } else if (cmd == "type" && !keyboard_->Usb()) {
-        // Into the focused text field, by the guest tools' it_typein (any text, at once).
-        Background([this, command] {
-            AgentReply reply = Agent("type", "", command.value("text", ""));
-            if (reply.status != 0)
-                Log("Typing failed (guest status %d)", reply.status);
-        });
-    } else if (cmd == "type" || (cmd == "key" && command.contains("text"))) {
-        if (int skipped = keyboard_->Type(command.value("text", "")))
-            Log("%d character(s) have no key on a US keyboard and weren't typed", skipped);
-    } else if (cmd == "key") {
-        if (!keyboard_->Press(command.value("key", "")))
-            Log("No key named %s", command.value("key", "").c_str());
-    } else if (cmd == "keyboard") {
-        keyboard_->KeepPluggedIn(command.value("on", false));
+    } else if (cmd == "type") {
+        keyboard_->Type(command.value("text", ""));
     } else if (ready && command.contains("id")) {
         HandleDeveloperCommand(command);
     } else {
         Reply(command, false, nullptr, ready ? "Unknown command " + cmd : "The device isn't running yet");
     }
+}
+
+// Queues a batch of touches with the engine. The UI's mouse and the on-screen keyboard both touch,
+// from different threads, and every batch needs a new, increasing id. Returns the batch's id.
+uint64_t Worker::Touch(const std::vector<QemuIosPortableContact> &contacts) {
+    std::lock_guard<std::mutex> lock(touchMutex_);
+    if (touchId_) {   // how the previous batch ended (the engine applies them asynchronously)
+        const int previous = engine_->inputStatus(touchId_);
+        if (previous != QEMU_IOS_OK && previous != QEMU_IOS_QUEUED)
+            Log("Touch batch %llu ended with %d", (unsigned long long)touchId_, previous);
+    }
+    const int result = engine_->touch(++touchId_, NowNs(), contacts.data(), contacts.size());
+    if (result != QEMU_IOS_QUEUED && result != QEMU_IOS_OK)
+        Log("The engine refused a touch (phase %u): %d", contacts.empty() ? 0 : contacts[0].phase, result);
+    return touchId_;
 }
 
 // Developer requests: each runs in order on the background thread and answers with a reply.
@@ -771,7 +638,7 @@ Worker::AgentReply Worker::Agent(const std::string &op, const std::string &argum
 int RunWorker(const std::vector<std::string> &args) {
     std::string deviceDir, framesName;
     HANDLE events = nullptr;
-    bool internet = false, webProxy = false, headphones = false, muted = false, keyboard = false;
+    bool internet = false, webProxy = false, headphones = false, muted = false;
     for (size_t i = 0; i < args.size(); i++) {
         const std::string &arg = args[i];
         const bool hasValue = i + 1 < args.size();
@@ -789,17 +656,15 @@ int RunWorker(const std::vector<std::string> &args) {
             headphones = true;
         else if (arg == "--muted")
             muted = true;
-        else if (arg == "--keyboard")
-            keyboard = true;
     }
     if (deviceDir.empty() || framesName.empty() || !events) {
         Log("usage: iOS-Emulator --worker --device <dir> --frames <name> --events <handle> [--internet] "
-            "[--web-proxy] [--headphones] [--muted] [--keyboard]");
+            "[--web-proxy] [--headphones] [--muted]");
         return 64;
     }
     try {
         Worker worker(OpenDevice(fs::path(Widen(deviceDir))), framesName, events, internet, webProxy, headphones,
-                      muted, keyboard);
+                      muted);
         return worker.Run();
     } catch (const std::exception &e) {
         Log("Worker failed: %s", e.what());

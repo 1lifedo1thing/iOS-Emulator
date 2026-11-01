@@ -128,3 +128,5 @@ private:
 
 // Saves a BGRA frame as a PNG file.
 void WritePng(const fs::path &path, const uint8_t *bgra, int width, int height);
+// Loads an image file (a screenshot) as BGRA pixels, top row first. Throws if it can't.
+std::vector<uint8_t> ReadImage(const fs::path &path, int &width, int &height);

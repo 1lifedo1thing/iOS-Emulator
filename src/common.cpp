@@ -519,3 +519,38 @@ void WritePng(const fs::path &path, const uint8_t *bgra, int width, int height) 
     if (FAILED(hr))
         throw std::runtime_error("Couldn't save the screenshot " + PathText(path));
 }
+
+// Loads an image with WIC, converted to BGRA.
+std::vector<uint8_t> ReadImage(const fs::path &path, int &width, int &height) {
+    HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    IWICImagingFactory *factory = nullptr;
+    IWICBitmapDecoder *decoder = nullptr;
+    IWICBitmapFrameDecode *frame = nullptr;
+    IWICFormatConverter *converter = nullptr;
+    std::vector<uint8_t> pixels;
+    UINT w = 0, h = 0;
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
+    if (SUCCEEDED(hr))
+        hr = factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand,
+                                                &decoder);
+    if (SUCCEEDED(hr)) hr = decoder->GetFrame(0, &frame);
+    if (SUCCEEDED(hr)) hr = factory->CreateFormatConverter(&converter);
+    if (SUCCEEDED(hr))
+        hr = converter->Initialize(frame, GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0,
+                                   WICBitmapPaletteTypeCustom);
+    if (SUCCEEDED(hr)) hr = converter->GetSize(&w, &h);
+    if (SUCCEEDED(hr)) {
+        pixels.resize(size_t(w) * h * 4);
+        hr = converter->CopyPixels(nullptr, w * 4, UINT(pixels.size()), pixels.data());
+    }
+    for (IUnknown *object : std::initializer_list<IUnknown *>{converter, frame, decoder, factory})
+        if (object)
+            object->Release();
+    if (SUCCEEDED(init))
+        CoUninitialize();
+    if (FAILED(hr))
+        throw std::runtime_error("Couldn't read the image " + PathText(path));
+    width = int(w);
+    height = int(h);
+    return pixels;
+}

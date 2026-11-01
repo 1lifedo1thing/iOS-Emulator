@@ -52,12 +52,13 @@ The program finds the `resources` folder next to it or in a parent folder, so it
 Moving the mouse brings up controls for volume, Home, Sleep/Wake and leaving fullscreen; they fade
 out a few seconds after the mouse stops.
 
-**Typing**: with **Send keyboard input to iOS** on (in Settings), what you type while a device is on
-screen goes straight to iOS, as on a US keyboard, and the shortcuts above take Ctrl (Ctrl+H for Home,
-Ctrl with the arrow keys to tilt, and so on). Otherwise, use the box under the device. On the iPad,
-text is typed on an emulated USB keyboard plugged into the device. iOS hides its on-screen keyboard
-while one is plugged in, so it stays plugged in only while that setting is on, or for a moment while
-text from the box is typed.
+**Typing**: tap a text field in iOS so its keyboard shows, then type in the box under the device. The
+app types by tapping the keys of iOS's on-screen keyboard, as a finger would, on every device and iOS
+version: it finds the keyboard on the screen (in any orientation), switches pages and Shift as needed,
+and skips characters the keyboard has no key for. iOS may auto-correct words, as it would yours. With
+**Send keyboard input to iOS** on (in Settings), what you type while a device is on screen (letters,
+digits, punctuation, Backspace and Enter) goes to iOS the same way, and the shortcuts above take Ctrl
+(Ctrl+H for Home, Ctrl with the arrow keys to tilt, and so on).
 
 ### Internet and the web proxy
 
@@ -97,14 +98,15 @@ iOS-Emulator --catalog [iPod3,1]                       firmwares that can be pre
 iOS-Emulator --prepare n18ap-8C148 --jailbreak         prepares a device (--name, --ipsw FILE)
 iOS-Emulator --import <LightTouch device folder>       copies a LightTouch device in
 iOS-Emulator --run <device> [--seconds N] [--screenshot shot.png] [--internet] [--no-web-proxy]
-             [--keyboard] [--tap x,y,t] [--swipe x,y,toX,toY,t[,seconds]]
-             [--request t '<json>'] [--send t '<json>']
+             [--tap x,y,t] [--swipe x,y,toX,toY,t[,seconds]]
+             [--request t '<json>'] [--send t '<json>'] [--shot t shot.png]
+iOS-Emulator --keyboard shot.png                       what typing reads off a screenshot
 ```
 
 `--run` boots a device, performs the taps, swipes and commands at the given times (screen
-coordinates from 0 to 1, times in seconds since start), saves a screenshot and shuts down cleanly. It
-exits 0 only when iOS shut down cleanly. Internet is off unless `--internet` is given, the web proxy is
-on unless `--no-web-proxy` is, and `--keyboard` keeps the iPad's USB keyboard plugged in.
+coordinates from 0 to 1, times in seconds since start), saves screenshots (`--shot` at a given time,
+`--screenshot` at the end) and shuts down cleanly. It exits 0 only when iOS shut down cleanly.
+Internet is off unless `--internet` is given, and the web proxy is on unless `--no-web-proxy` is.
 
 Commands are the worker commands listed in `src/worker.h`. `--request` sends a developer request and
 prints its reply; `--send` sends any command without waiting, for example
@@ -150,7 +152,8 @@ iOS-Emulator.exe (the window)                 iOS-Emulator.exe --worker (one per
 | `src/main.cpp` | Entry point and the command-line modes |
 | `src/ui.cpp` | The window: device list, screen and controls, fullscreen, Add Device page, developer panel, settings |
 | `src/session.cpp` | A running device as the window sees it: starts the helpers, reads frames and events |
-| `src/worker.cpp` | The worker process: runs the engine, sound, keyboard, commands |
+| `src/worker.cpp` | The worker process: runs the engine, sound, commands |
+| `src/keyboard.cpp` | Typing: finds iOS's on-screen keyboard on the screen and taps its keys |
 | `src/engine.cpp` | The engine's C API and each board's boot command line |
 | `src/services.cpp` | Developer services over USB (libimobiledevice) |
 | `src/proxy.cpp` | The guest's web proxy (OpenSSL) |

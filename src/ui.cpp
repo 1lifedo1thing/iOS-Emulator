@@ -324,7 +324,6 @@ void App::StartDevice(const Device &device) {
         options.webProxy = settings_.webProxy;
         options.headphones = settings_.headphones;
         options.muted = settings_.muted;
-        options.keyboard = settings_.sendKeys;
         sessions_[device.id] = std::make_unique<Session>(device, options);
         error_.clear();
     } catch (const std::exception &e) {
@@ -852,8 +851,8 @@ void App::HardwareKeys(Session &session) {
 }
 
 // With "Send keyboard input to iOS" on, what you type goes to iOS while no text box here has focus:
-// the characters as typed (Shift and AltGr included), and Backspace, Enter, Tab, Delete, Home, End
-// and the arrow keys (Esc is kept for leaving fullscreen).
+// the characters as typed (Shift and AltGr included), Backspace and Enter. The worker taps them
+// on iOS's on-screen keyboard (keyboard.h), which has no keys for the others.
 void App::SendKeys(Session &session) {
     const ImGuiIO &io = ImGui::GetIO();
     if (!settings_.sendKeys || io.WantTextInput)
@@ -862,19 +861,16 @@ void App::SendKeys(Session &session) {
     for (ImWchar c : io.InputQueueCharacters)
         if (c >= 0x20 && c != 0x7f)   // not control characters (Ctrl+H and the like come as these)
             text += wchar_t(c);
-    if (!text.empty())
-        session.Send({{"cmd", "key"}, {"text", Narrow(text)}});
-    if (io.KeyCtrl || io.KeyAlt)
-        return;   // Ctrl+arrows tilt; Alt is for the second finger
-    static const std::pair<ImGuiKey, const char *> keys[] = {
-        {ImGuiKey_Backspace, "backspace"}, {ImGuiKey_Enter, "enter"}, {ImGuiKey_KeypadEnter, "enter"},
-        {ImGuiKey_Tab, "tab"},             {ImGuiKey_Delete, "delete"}, {ImGuiKey_Home, "home"},
-        {ImGuiKey_End, "end"},             {ImGuiKey_LeftArrow, "left"}, {ImGuiKey_RightArrow, "right"},
-        {ImGuiKey_UpArrow, "up"},          {ImGuiKey_DownArrow, "down"},
-    };
-    for (const auto &[key, name] : keys)
-        if (ImGui::IsKeyPressed(key))   // repeats while held, as typing does
-            session.Send({{"cmd", "key"}, {"key", name}});
+    if (!io.KeyCtrl && !io.KeyAlt) {   // Ctrl+arrows tilt; Alt is for the second finger
+        if (ImGui::IsKeyPressed(ImGuiKey_Backspace))   // repeats while held, as typing does
+            text += L'\b';
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter))
+            text += L'\n';
+    }
+    if (!text.empty()) {
+        session.typingProblem.clear();
+        session.Send({{"cmd", "type"}, {"text", Narrow(text)}});
+    }
 }
 
 void App::Controls(Session &session) {
@@ -932,22 +928,30 @@ void App::Controls(Session &session) {
         session.Stop();
     Tooltip("Shuts iOS down cleanly, like sliding to power off.");
 
-    // Typing: the text goes to the field that has focus in iOS, through a USB keyboard plugged into
-    // the device where it has a USB host, else through the guest tools (worker.h).
-    ImGui::BeginDisabled(!ready || (!session.usbKeyboard && session.agent != 1));
-    ImGui::SetNextItemWidth(-ImGui::CalcTextSize("Type").x - ImGui::GetStyle().FramePadding.x * 2 - 8);
+    // Typing: the worker taps the text on iOS's on-screen keyboard (keyboard.h), into the text
+    // field that has focus. A (!) after the box tells what couldn't be typed.
+    ImGui::BeginDisabled(!ready);
+    const char *problemMark = "(!)";
+    float reserve = ImGui::CalcTextSize("Type").x + ImGui::GetStyle().FramePadding.x * 2 + 8;
+    if (!session.typingProblem.empty())
+        reserve += ImGui::CalcTextSize(problemMark).x + 8;
+    ImGui::SetNextItemWidth(-reserve);
     bool enter = ImGui::InputTextWithHint("##type", "Type into iOS (Enter sends)", &typeText_,
                                           ImGuiInputTextFlags_EnterReturnsTrue);
-    Tooltip(session.usbKeyboard
-                ? "Typed on a USB keyboard plugged into the device for it, as on a US keyboard (characters it has "
-                  "no key for are skipped). iOS hides its on-screen keyboard while it's plugged in."
-                : "Typed into the text field that has focus in iOS, by the guest tools.");
+    Tooltip("Typed by tapping the keys of iOS's on-screen keyboard, so tap a text field in iOS first. "
+            "Characters it has no key for are skipped, and iOS may auto-correct words.");
     ImGui::SameLine();
     if ((ImGui::Button("Type") || enter) && !typeText_.empty()) {
+        session.typingProblem.clear();
         session.Send({{"cmd", "type"}, {"text", typeText_}});
         typeText_.clear();
     }
     ImGui::EndDisabled();
+    if (!session.typingProblem.empty()) {
+        ImGui::SameLine();
+        ImGui::TextColored(kWarn, "%s", problemMark);
+        Tooltip(session.typingProblem.c_str());
+    }
 }
 
 void App::SaveScreenshot(Session &session) {
@@ -983,14 +987,9 @@ void App::SettingsPage() {
     DimText("DISPLAY AND CONTROLS");
     changed |= ImGui::Checkbox("Smooth scaling", &settings_.smooth);
     changed |= ImGui::Checkbox("Arrow keys tilt the device", &settings_.tilt);
-    if (ImGui::Checkbox("Send keyboard input to iOS", &settings_.sendKeys)) {
-        changed = true;
-        for (auto &[id, session] : sessions_)   // the iPad's USB keyboard follows the setting
-            session->Send({{"cmd", "keyboard"}, {"on", settings_.sendKeys}});
-    }
-    Tooltip("What you type while a device is on screen goes to iOS, as on a US keyboard. The shortcuts then take "
-            "Ctrl (Ctrl+H for Home, and so on). On the iPad, a USB keyboard stays plugged in for it, so iOS hides "
-            "its on-screen keyboard.");
+    changed |= ImGui::Checkbox("Send keyboard input to iOS", &settings_.sendKeys);
+    Tooltip("What you type while a device is on screen is tapped on iOS's on-screen keyboard (letters, digits, "
+            "punctuation, Backspace and Enter). The shortcuts then take Ctrl (Ctrl+H for Home, and so on).");
     if (changed)
         settings_.Save();
 

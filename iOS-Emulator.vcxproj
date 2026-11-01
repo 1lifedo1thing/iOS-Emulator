@@ -83,6 +83,7 @@
     <ClCompile Include="src\common.cpp" />
     <ClCompile Include="src\engine.cpp" />
     <ClCompile Include="src\firmware.cpp" />
+    <ClCompile Include="src\keyboard.cpp" />
     <ClCompile Include="src\library.cpp" />
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\proxy.cpp" />
@@ -102,6 +103,7 @@
     <ClInclude Include="src\common.h" />
     <ClInclude Include="src\engine.h" />
     <ClInclude Include="src\firmware.h" />
+    <ClInclude Include="src\keyboard.h" />
     <ClInclude Include="src\library.h" />
     <ClInclude Include="src\proxy.h" />
     <ClInclude Include="src\services.h" />

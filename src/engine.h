@@ -19,9 +19,6 @@ struct Engine {
 
     decltype(&qemu_ios_main) main = nullptr;
     decltype(&qemu_ios_portable_board_at) boardAt = nullptr;
-    decltype(&qemu_ios_device_info) deviceInfo = nullptr;
-    decltype(&qemu_ios_ui_hardware_keyboard) hardwareKeyboard = nullptr;
-    decltype(&qemu_ios_ui_key_mac) keyMac = nullptr;
     decltype(&qemu_ios_ui_attach) attach = nullptr;
     decltype(&qemu_ios_portable_frame_copy) frameCopy = nullptr;
     decltype(&qemu_ios_portable_touch) touch = nullptr;

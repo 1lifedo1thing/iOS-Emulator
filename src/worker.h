@@ -11,14 +11,8 @@
 //   {"cmd":"touch","contacts":[{"id":1,"phase":0,"x":0.5,"y":0.5}]}   phase: 0 down, 1 move, 2 up, 3 cancel
 //   {"cmd":"button","button":0,"down":true}                           0 Home, 1 Sleep/Wake, 2 Vol+, 3 Vol-
 //   {"cmd":"motion","x":0,"y":0,"z":9.8}                              accelerometer, m/s^2, portrait axes
-//   {"cmd":"type","text":"hello"}        types into the focused text field: on boards with a USB host (the
-//                                        iPad) on the USB keyboard, as on a US layout; elsewhere through the
-//                                        guest agent (it_typein)
-//   {"cmd":"key","text":"a"}  {"cmd":"key","key":"backspace"}   presses keys on the emulated keyboard (as
-//                                        typed on a US layout, or by name: backspace, enter, tab, delete, home,
-//                                        end, left, right, up, down)
-//   {"cmd":"keyboard","on":true}         boards with a USB host: keep the USB keyboard plugged in (iOS hides
-//                                        its on-screen keyboard while it is); off, it's plugged in only to type
+//   {"cmd":"type","text":"hello\n"}      types by tapping iOS's on-screen keyboard (keyboard.h), into the
+//                                        text field that has focus; "\n" taps Return, "\b" Delete
 //   {"cmd":"pause","paused":true}   {"cmd":"mute","muted":true}   {"cmd":"internet","on":true}
 //   {"cmd":"webproxy","on":true}                                      HTTPS through the web proxy's bridge
 //   {"cmd":"stop"}                                                    shuts iOS down cleanly, then exits
@@ -33,12 +27,13 @@
 //     {"cmd":"forward","on":true,"port":2222,"devicePort":22}
 //
 // Events (worker -> UI), each with an "event" field:
-//   board   {machine, width, height, capabilities, usbKeyboard}   once, before booting
+//   board   {machine, width, height, capabilities}       once, before booting
 //   status  {state: starting|running|paused|stopping, sleeping, agent}   when it changes
 //   reply   {id, ok, error?, result?}                     the answer to a developer request
 //   progress {id, text}                                   how a long request (an app install) is going
 //   log     {line}                                        a system log line, while capturing
 //   proxy   {status, error}                               setting up the web proxy (its certificate in iOS)
+//   typing  {message}                                     what couldn't be typed, and why
 //   exit    {clean, message}                              last line before the worker exits
 #pragma once
 
@@ -46,5 +41,5 @@
 
 // Runs a worker with the arguments after "--worker". Returns the process exit code.
 //   --device <dir>  --frames <mapping name>  --events <pipe handle>
-//   [--internet] [--web-proxy] [--headphones] [--muted] [--keyboard]
+//   [--internet] [--web-proxy] [--headphones] [--muted]
 int RunWorker(const std::vector<std::string> &args);
