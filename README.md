@@ -8,6 +8,8 @@ terminal, app installs, the system log and SSH, so tweaks can be built and teste
 It is a small C++ take on [LightTouch](https://github.com/blake-lucas/LightTouch): the same engine and
 preparation tool, driven by a Dear ImGui app.
 
+It is heavily WIP and still has bugs.
+
 ## Requirements
 
 - Windows 10 (1903 or later) or 11, 64-bit
