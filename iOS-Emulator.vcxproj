@@ -46,12 +46,15 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <!-- OPENSSL_NO_FILENAMES keeps OpenSSL's macros from embedding our source paths (__FILE__) in the exe. -->
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;OPENSSL_NO_FILENAMES;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(ProjectDir)third_party\imgui;$(ProjectDir)third_party\libimobiledevice\include;$(ProjectDir)third_party\openssl\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <!-- Record only the .pdb's file name in the exe, not the full build path. -->
+      <AdditionalOptions>/PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions>
       <AdditionalDependencies>opengl32.lib;winhttp.lib;winmm.lib;ws2_32.lib;bcrypt.lib;shell32.lib;comdlg32.lib;delayimp.lib;libimobiledevice-1.0.lib;libplist-2.0.lib;libusbmuxd-2.0.lib;libssl-3-x64.lib;libcrypto-3-x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ProjectDir)third_party\libimobiledevice\lib;$(ProjectDir)third_party\openssl\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <!-- The USB and OpenSSL libraries live in resources\ and load on first use (main.cpp points the DLL search there). -->
@@ -71,6 +74,9 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <!-- Static C++ runtime: the release exe runs without the Visual C++ Redistributable.
+           Safe because the bundled DLLs use their own runtime (msvcrt) and are freed only through their own *_free calls. -->
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
