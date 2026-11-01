@@ -43,12 +43,33 @@ The program finds the `resources` folder next to it or in a parent folder, so it
    | + / - | Volume |
    | Arrow keys | Tilt the device (for games steered by tilting) |
    | The box under the device | Types text into iOS |
+   | F11 | Fullscreen (F11 or Esc leaves it) |
 
 3. **Stop** shuts iOS down cleanly, like sliding to power off. Each device keeps its own storage; the
    prepared system is never changed, and **Erase** brings a device back to it.
 
-Turn **Internet** on (per session, or by default in Settings) for Safari and Cydia. Plain `http` sites
-and Cydia's repositories work; modern `https` sites mostly don't, as old iOS can't speak today's TLS.
+**Fullscreen** (the button or F11) shows only the device's screen, as large as the monitor allows.
+Moving the mouse brings up controls for volume, Home, Sleep/Wake and leaving fullscreen; they fade
+out a few seconds after the mouse stops.
+
+**Typing**: with **Send keyboard input to iOS** on (in Settings), what you type while a device is on
+screen goes straight to iOS, as on a US keyboard, and the shortcuts above take Ctrl (Ctrl+H for Home,
+Ctrl with the arrow keys to tilt, and so on). Otherwise, use the box under the device. On the iPad,
+text is typed on an emulated USB keyboard plugged into the device. iOS hides its on-screen keyboard
+while one is plugged in, so it stays plugged in only while that setting is on, or for a moment while
+text from the box is typed.
+
+### Internet and the web proxy
+
+Turn **Internet** on (per session, or by default in Settings) for Safari and Cydia. Old iOS only
+knows outdated encryption, which today's `https` sites refuse. The **Web proxy** (on by default,
+switchable while a device runs) handles that: iOS's web traffic goes to a proxy on your computer,
+which speaks the old encryption to iOS and modern encryption to the website, checking the site's
+certificate against Windows' own trust store. The device trusts the proxy through a certificate the
+app installs in it (each device gets its own, kept in `%LOCALAPPDATA%\iOS-Emulator\network\<id>\`).
+With the web proxy off, bytes pass through untouched and iOS talks to websites itself, so mostly plain
+`http` sites and Cydia's repositories work. The proxy never connects to your own computer or local
+network.
 
 ## Developer tools
 
@@ -75,17 +96,26 @@ iOS-Emulator --list                                    devices in the library
 iOS-Emulator --catalog [iPod3,1]                       firmwares that can be prepared
 iOS-Emulator --prepare n18ap-8C148 --jailbreak         prepares a device (--name, --ipsw FILE)
 iOS-Emulator --import <LightTouch device folder>       copies a LightTouch device in
-iOS-Emulator --run <device> [--seconds N] [--screenshot shot.png] [--internet]
-             [--tap x,y,t] [--swipe x,y,toX,toY,t[,seconds]] [--request t '<json>']
+iOS-Emulator --run <device> [--seconds N] [--screenshot shot.png] [--internet] [--no-web-proxy]
+             [--keyboard] [--tap x,y,t] [--swipe x,y,toX,toY,t[,seconds]]
+             [--request t '<json>'] [--send t '<json>']
 ```
 
-`--run` boots a device, performs the taps, swipes and developer requests at the given times (screen
-coordinates from 0 to 1, times in seconds since start), saves a screenshot and shuts down cleanly.
-Requests are the worker commands listed in `src/worker.h`, for example:
+`--run` boots a device, performs the taps, swipes and commands at the given times (screen
+coordinates from 0 to 1, times in seconds since start), saves a screenshot and shuts down cleanly. It
+exits 0 only when iOS shut down cleanly. Internet is off unless `--internet` is given, the web proxy is
+on unless `--no-web-proxy` is, and `--keyboard` keeps the iPad's USB keyboard plugged in.
+
+Commands are the worker commands listed in `src/worker.h`. `--request` sends a developer request and
+prints its reply; `--send` sends any command without waiting, for example
+`{"cmd":"type","text":"hi"}`:
 
 ```
 iOS-Emulator --run "My iPod" --seconds 120 --request 90 "{\"cmd\":\"shell\",\"command\":\"ls /var/mobile\"}"
 ```
+
+In Windows PowerShell 5.1, JSON containing spaces gets mangled on the way to the program; put such a
+command line in a `.cmd` file instead.
 
 For engine debugging, `IOS_EMULATOR_ENGINE_ARGS` adds QEMU options (for instance
 `-trace enable=ipod_touch_multitouch_log`).
@@ -98,7 +128,8 @@ iOS-Emulator.exe (the window)                 iOS-Emulator.exe --worker (one per
   firmware: downloads, firmwarekit.exe          frames -> shared memory -> the window
   session: one running device  ---------------> sound -> Windows
      starts lighttouch-usbmuxd.exe (USB)        services: files, apps, syslog, SSH (libimobiledevice)
-     reads frames, sends input and requests     commands on stdin, events on a pipe (JSON lines)
+     reads frames, sends input and requests     web proxy: iOS's HTTPS <-> modern TLS (OpenSSL)
+                                                commands on stdin, events on a pipe (JSON lines)
 ```
 
 - The engine is a build of QEMU with a C API (`third_party/qemu-ios`). It can start only once per
@@ -107,17 +138,22 @@ iOS-Emulator.exe (the window)                 iOS-Emulator.exe --worker (one per
   guest tools (an agent, AppSync, the OpenGL ES front end) and, with `--jailbreak`, Cydia and AFC2.
 - `lighttouch-usbmuxd.exe` plays the USB cable: the guest's USB port connects to it, and so does
   libimobiledevice for the developer services.
+- Prepared devices carry a proxy auto-config file that sends web traffic to `10.0.2.100:3128`. The
+  engine always forwards that address to the worker's web proxy (`src/proxy.cpp`), so it answers at
+  once even with the proxy off; with nothing there, every new connection in iOS would wait out a
+  timeout.
 
 ### Source files
 
 | File | What it does |
 | --- | --- |
 | `src/main.cpp` | Entry point and the command-line modes |
-| `src/ui.cpp` | The window: device list, screen and controls, Add Device page, developer panel, settings |
+| `src/ui.cpp` | The window: device list, screen and controls, fullscreen, Add Device page, developer panel, settings |
 | `src/session.cpp` | A running device as the window sees it: starts the helpers, reads frames and events |
-| `src/worker.cpp` | The worker process: runs the engine, sound, commands |
+| `src/worker.cpp` | The worker process: runs the engine, sound, keyboard, commands |
 | `src/engine.cpp` | The engine's C API and each board's boot command line |
 | `src/services.cpp` | Developer services over USB (libimobiledevice) |
+| `src/proxy.cpp` | The guest's web proxy (OpenSSL) |
 | `src/firmware.cpp` | The firmware catalog, downloads and firmwarekit |
 | `src/library.cpp` | Devices on disk |
 | `src/common.cpp` | Shared helpers: folders, files, hashing, child processes, shared frames |
@@ -125,16 +161,17 @@ iOS-Emulator.exe (the window)                 iOS-Emulator.exe --worker (one per
 ### Where things are
 
 `%LOCALAPPDATA%\iOS-Emulator` holds `library\records\<id>\` (one folder per device: `base\` as prepared,
-`state\` with everything it wrote, `record.json`), `pairing\` (USB pairing records), `logs\`
-(`app.log`, `worker-*.log`, `usbmuxd-*.log`, `firmwarekit.log`) and `settings.json`. Screenshots go to
-`Pictures\iOS-Emulator`.
+`state\` with everything it wrote, `record.json`), `pairing\` (USB pairing records), `network\<id>\`
+(each device's web proxy certificate), `logs\` (`app.log`, `worker-*.log`, `usbmuxd-*.log`,
+`firmwarekit.log`) and `settings.json`. Screenshots go to `Pictures\iOS-Emulator`.
 
 ## Credits and license
 
 Built on [LightTouch](https://github.com/blake-lucas/LightTouch) by Blake Lucas (its engine, firmwarekit,
 guest tools and firmware catalog, in `resources\`), [qemu-ios](https://github.com/blake-lucas/qemu-ios),
-[QEMU](https://www.qemu.org), [libimobiledevice](https://libimobiledevice.org) and
-[Dear ImGui](https://github.com/ocornut/imgui), with [nlohmann/json](https://github.com/nlohmann/json).
+[QEMU](https://www.qemu.org), [libimobiledevice](https://libimobiledevice.org),
+[Dear ImGui](https://github.com/ocornut/imgui) and [OpenSSL](https://www.openssl.org), with
+[nlohmann/json](https://github.com/nlohmann/json).
 The licenses of the bundled components are in `resources\licenses` and `third_party`.
 
 Like LightTouch, this program is free software under the GNU GPL, version 2 or (at your option) any
