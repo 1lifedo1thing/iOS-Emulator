@@ -24,9 +24,14 @@ msbuild iOS-Emulator.vcxproj -p:Configuration=Release -p:Platform=x64   (from a 
 build\Release\iOS-Emulator.exe
 ```
 
+From plain PowerShell, find MSBuild first: `& "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -prerelease -find "MSBuild\**\Bin\MSBuild.exe"`.
+
 - A new `.cpp`/`.h` must be added to the `ClCompile`/`ClInclude` lists in `iOS-Emulator.vcxproj`. The `.filters` file uses wildcards and needs no change.
 - The exe finds `resources/` next to itself or in a parent folder, so it runs straight from `build\<Config>`.
-- `init.bat` puts the bundled Portable Git (`PortableGit-2.55.0.5-64-bit.7z/`, a folder despite the name) on PATH for one console.
+
+### Git
+
+There is no `.git` folder in the root: the repository lives inside the bundled Portable Git folder (`PortableGit-2.55.0.5-64-bit.7z/`, a folder despite the name). `init.bat` sets `GIT_DIR` to it and puts its `git` on PATH for one console; without it git reports "not a git repository". From PowerShell: `cmd /c "call <project>\init.bat >nul && git status"` (call it by full path). Work lands on `master` and is pushed to `origin` (github.com/mada-02/iOS-Emulator).
 
 ### Rebuilding `resources/firmwarekit.exe`
 
@@ -54,6 +59,15 @@ iOS-Emulator --run <device> --seconds 120 --screenshot shot.png --tap 0.5,0.9,60
 
 `--run` takes `--internet` (off by default) and `--no-web-proxy` (the proxy is on by default). `--send <t> <json>` sends any worker command without waiting for a reply, e.g. `{"cmd":"type","text":"hi"}`, and `--shot <t> <file.png>` saves the screen at that time. In PowerShell 5.1, JSON with spaces gets mangled, so put such a command line in a `.cmd` file. `iOS-Emulator --keyboard shot.png` prints what typing reads off a screenshot (the keyboard's rows and keys, page, Shift). When typing finds no keyboard, the frame it looked at is saved as `keyboard-not-found.png` in the logs folder. `--run` exits 0 only when iOS shut down cleanly. The iPod touch 2G on 3.1.3 boots fastest. Logs are in `%LOCALAPPDATA%\iOS-Emulator\logs\` (`app.log`, `worker-*.log`, `usbmuxd-*.log`, `firmwarekit.log`). `IOS_EMULATOR_ENGINE_ARGS` passes extra QEMU options to the engine.
 
+**Snapshots skip the boot.** Save one once, then start test runs from it (a restored run is at its lock screen within about 3 s):
+
+```
+iOS-Emulator --run <device> --seconds 120 --save-snapshot 90 booted
+iOS-Emulator --run <device> --snapshot booted --seconds 20 --tap 0.5,0.9,2 --shot 5 shot.png
+```
+
+A `--snapshot` run works on a throwaway copy of the snapshot's disk in `%TEMP%` (the device is never touched, so every run starts identical), counts `t` from the restore, and ends by quitting at once (exit 0 without an iOS shutdown). Touch and the guest agent work at once; USB services (`info`, `files.*`) take up to about 40 s to reconnect.
+
 ## Architecture
 
 One executable, several modes (`wWinMain` in `src/main.cpp`): no arguments opens the ImGui window (`ui.cpp`), `--list/--run/--catalog/--prepare/--import` are console modes, and `--worker` runs a single device.
@@ -75,10 +89,12 @@ One executable, several modes (`wWinMain` in `src/main.cpp`): no arguments opens
 
 **Web proxy (`proxy.cpp`)** runs inside the worker too. firmwarekit gives iOS a proxy auto-config file that sends web traffic to `10.0.2.100:3128` first, and the engine forwards that address (a `guestfwd` in `BuildBootArgs`) to the proxy's Unix socket. The forward must always be there: with nothing answering, every new connection in iOS waits out a timeout. Modes: Off (internet off, refuses), Direct (passes bytes through), Bridge (the default: re-encrypts HTTPS, old TLS to iOS and modern TLS to the website, which Windows' trust store checks). For Bridge, the worker installs the proxy's CA in iOS through the guest agent (`put`, then the bundled `ittrust add`). The CA is kept in `%LOCALAPPDATA%\iOS-Emulator\network\<id>\proxy-ca.pem`. OpenSSL is MSYS2's `mingw-w64-x86_64-openssl` 3.6.5, the same DLLs as in `resources/` (delay-loaded like libimobiledevice). `third_party/openssl/` holds that package's headers and import libraries made from the DLLs (`dumpbin /exports` into a `.def`, then `lib /def`). Those DLLs use another C runtime, so never pass them a `FILE*`. Use memory BIOs instead.
 
+**Snapshots (`snapshot.cpp`)** are a folder `records\<id>\snapshots\<name>\`: `machine.state` (qemu's migration stream) and a copy of `state\` taken while the guest is stopped, since the disk must match the memory. The engine's `qemu_ios_snapshot_save2` and `-incoming file:` can't work on Windows (qemu's file channel has no Windows code for blocking mode: saves fail, restores abort), so both go over local TCP: saving drives qemu's monitor (QMP), which the worker opens only with `--save-snapshots` since it gives full control of the VM, and restoring starts the engine with `-incoming tcp:` and feeds it the file. `-global migration.store-global-state=off` makes a restored machine run by itself. Saving wakes the display first, because whether it sleeps isn't in the snapshot.
+
 **Adding a developer feature** usually touches: the request handler in `worker.cpp`, the implementation in `services.cpp`, the protocol comment in `worker.h`, and the tab in `ui.cpp`. It is then reachable from `--run --request` automatically.
 
 **Device preparation (`firmware.cpp`):** the catalog comes from `resources/firmware-catalog.json`. `Preparation` downloads the IPSW (and a boot ROM for the oldest boards) on a background thread, then runs `resources/firmwarekit.exe`. That tool decrypts the IPSW, builds the NAND, installs `resources/guest-tools/` and, with `--jailbreak`, Cydia and AFC2. `library.cpp` then moves the output into the library.
 
-**Device library (`library.cpp`):** `%LOCALAPPDATA%\iOS-Emulator\library\records\<id>\` holds `record.json`, `base/`, `state/` and `assets/`. `base/` is never written after preparation. Everything the guest writes goes to `state/` (NAND overlay, NOR copy), so **Erase** just clears `state/`. The layout deliberately matches LightTouch's, so LightTouch device folders can be imported. Keep that compatibility.
+**Device library (`library.cpp`):** `%LOCALAPPDATA%\iOS-Emulator\library\records\<id>\` holds `record.json`, `base/`, `state/`, `assets/` and `snapshots/`. `base/` is never written after preparation. Everything the guest writes goes to `state/` (NAND overlay, NOR copy), so **Erase** just clears `state/`. The layout deliberately matches LightTouch's, so LightTouch device folders can be imported. Keep that compatibility.
 
 Each board's boot command line is built in `BuildBootArgs` (`engine.cpp`).
