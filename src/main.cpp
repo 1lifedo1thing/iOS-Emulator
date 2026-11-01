@@ -5,11 +5,14 @@
 //   iOS-Emulator.exe                       the app window
 //   iOS-Emulator.exe --list                lists the devices in the library
 //   iOS-Emulator.exe --run <device> [--seconds N] [--screenshot file.png] [--internet] [--no-web-proxy]
-//                    [--tap x,y,t ...] [--swipe x,y,toX,toY,t[,seconds] ...] [--request t json ...]
+//                    [--keyboard] [--tap x,y,t ...] [--swipe x,y,toX,toY,t[,seconds] ...]
+//                    [--request t json ...] [--send t json ...]
 //                                          boots a device without a window (for testing and scripts);
 //                                          --no-web-proxy lets iOS connect to websites itself (proxy.h);
+//                                          --keyboard keeps the USB keyboard plugged in (boards with a USB host);
 //                                          --tap/--swipe touch the screen (coordinates 0..1) t seconds after start;
-//                                          --request sends a developer command (worker.h) and prints the reply
+//                                          --request sends a developer command (worker.h) and prints the reply;
+//                                          --send sends any other command (e.g. {"cmd":"type","text":"hi"})
 //   iOS-Emulator.exe --catalog [product]   lists the firmwares that can be prepared
 //   iOS-Emulator.exe --prepare <firmware id> [--name N] [--jailbreak] [--ipsw file]
 //                                          prepares a new device (e.g. --prepare n18ap-8C148 --jailbreak)
@@ -60,9 +63,15 @@ static int RunCommand(const std::vector<std::string> &args) {
     struct Gesture {
         double x, y, toX, toY, at, seconds;
     };
+    // A command (worker.h) to send `at` seconds after the start; a developer request prints its reply.
+    struct Command {
+        double at;
+        Json json;
+        bool request;
+    };
     std::string name, screenshot;
     std::vector<Gesture> gestures;
-    std::vector<std::pair<double, Json>> requests;   // developer commands to send, by time
+    std::vector<Command> commands;
     int seconds = 60;
     SessionOptions options;
     for (size_t i = 0; i < args.size(); i++) {
@@ -72,10 +81,13 @@ static int RunCommand(const std::vector<std::string> &args) {
         else if (args[i] == "--swipe" && i + 1 < args.size() &&
                  sscanf(args[++i].c_str(), "%lf,%lf,%lf,%lf,%lf,%lf", &g.x, &g.y, &g.toX, &g.toY, &g.at, &g.seconds) >= 5)
             gestures.push_back({g.x, g.y, g.toX, g.toY, g.at, g.seconds > 0 ? g.seconds : 1.0});
-        else if (args[i] == "--request" && i + 2 < args.size()) {
+        else if ((args[i] == "--request" || args[i] == "--send") && i + 2 < args.size()) {
+            const bool request = args[i] == "--request";
             const double at = atof(args[++i].c_str());
-            requests.push_back({at, Json::parse(args[++i])});
-        } else if (args[i] == "--seconds" && i + 1 < args.size())
+            commands.push_back({at, Json::parse(args[++i]), request});
+        } else if (args[i] == "--keyboard")
+            options.keyboard = true;
+        else if (args[i] == "--seconds" && i + 1 < args.size())
             seconds = std::stoi(args[++i]);
         else if (args[i] == "--screenshot" && i + 1 < args.size())
             screenshot = args[++i];
@@ -124,13 +136,16 @@ static int RunCommand(const std::vector<std::string> &args) {
             Print(steps ? "Swiped" : "Tapped");
             it = gestures.erase(it);
         }
-        for (auto it = requests.begin(); it != requests.end();) {
-            if (elapsed < it->first) {
+        for (auto it = commands.begin(); it != commands.end();) {
+            if (elapsed < it->at) {
                 ++it;
                 continue;
             }
-            session.Request(it->second, [](const Json &reply) { Print(reply.dump(2)); });
-            it = requests.erase(it);
+            if (it->request)
+                session.Request(it->json, [](const Json &reply) { Print(reply.dump(2)); });
+            else
+                session.Send(it->json);
+            it = commands.erase(it);
         }
         if (session.state != lastState) {
             lastState = session.state;

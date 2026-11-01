@@ -27,6 +27,9 @@ Engine::Engine(const fs::path &dll) {
 
     find(main, "qemu_ios_main");
     find(boardAt, "qemu_ios_portable_board_at");
+    find(deviceInfo, "qemu_ios_device_info");
+    find(hardwareKeyboard, "qemu_ios_ui_hardware_keyboard");
+    find(keyMac, "qemu_ios_ui_key_mac");
     find(attach, "qemu_ios_ui_attach");
     find(frameCopy, "qemu_ios_portable_frame_copy");
     find(touch, "qemu_ios_portable_touch");

@@ -21,6 +21,7 @@ struct SessionOptions {
     bool webProxy = true;     // HTTPS through the web proxy's bridge (proxy.h)
     bool headphones = false;
     bool muted = false;
+    bool keyboard = false;    // keep the USB keyboard plugged in (boards with a USB host, worker.h)
 };
 
 class Session {
@@ -53,6 +54,7 @@ public:
     int agent = 0;                    // guest tools: 0 not running, 1 alive, 2 not answering
     int screenWidth = 320, screenHeight = 480;
     uint64_t capabilities = 0;        // QEMU_IOS_CAP_* bits
+    bool usbKeyboard = false;         // typing goes through a USB keyboard plugged into the device
     std::string machine;
     bool paused = false, muted = false, internet = false, webProxy = true;
     std::string proxyStatus;          // how setting up the web proxy went (the latest "proxy" event)

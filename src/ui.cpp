@@ -43,6 +43,7 @@ struct Settings {
     bool muted = false;
     bool smooth = true;        // smooth scaling of the screen (off: sharp pixels)
     bool tilt = true;          // arrow keys tilt the device
+    bool sendKeys = false;     // what you type goes to iOS (the hardware shortcuts then take Ctrl)
     std::string selected;      // the device selected last
 
     static fs::path File() { return DataDir() / "settings.json"; }
@@ -56,6 +57,7 @@ struct Settings {
             muted = j.value("muted", muted);
             smooth = j.value("smooth", smooth);
             tilt = j.value("tilt", tilt);
+            sendKeys = j.value("sendKeys", sendKeys);
             selected = j.value("selected", selected);
         } catch (...) {
             // first start, or an unreadable file: keep the defaults
@@ -63,10 +65,14 @@ struct Settings {
     }
 
     void Save() const {
-        Json j = {{"internet", internet}, {"webProxy", webProxy}, {"headphones", headphones}, {"muted", muted},
-                  {"smooth", smooth},     {"tilt", tilt},         {"selected", selected}};
+        Json j = {{"internet", internet}, {"webProxy", webProxy}, {"headphones", headphones},
+                  {"muted", muted},       {"smooth", smooth},     {"tilt", tilt},
+                  {"sendKeys", sendKeys}, {"selected", selected}};
         SaveFile(File(), j.dump(2));
     }
+
+    // The keys of a hardware shortcut, as shown in tooltips: "H", or "Ctrl+H" while keys go to iOS.
+    std::string Shortcut(const char *keys) const { return (sendKeys ? "Ctrl+" : "") + std::string(keys); }
 };
 
 // ---- Tilt ------------------------------------------------------------------------------------
@@ -200,6 +206,11 @@ public:
     bool Finished() const { return finished_; }
     bool Busy() const { return !sessions_.empty(); }   // something on screen keeps changing
     void ShowAddDevice() { page_ = Page::AddDevice; }
+    bool Fullscreen() const { return fullscreen_; }    // the window should cover its monitor
+    void EnterFullscreen() {                           // shows the selected device fullscreen, if it runs
+        fullscreen_ = true;
+        controlsShownAt_ = ImGui::GetTime();
+    }
 
 private:
     enum class Page { Device, AddDevice, Settings };
@@ -215,9 +226,14 @@ private:
     void StoppedDeviceView(Device &device);
     void RunningDeviceView(Device &device, Session &session);
     void DeviceScreen(Session &session, ImVec2 area);
+    ImVec2 ScreenSize(Session &session, bool &turned);
+    void DrawScreen(Session &session, ImVec2 origin, ImVec2 size, bool turned);
     void ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, bool turned);
+    void FullscreenView(Session &session);
+    void FullscreenControls(Session &session);
     void Controls(Session &session);
     void HardwareKeys(Session &session);
+    void SendKeys(Session &session);
     void SaveScreenshot(Session &session);
     void SettingsPage();
     void AddDevicePage();
@@ -241,6 +257,10 @@ private:
     std::set<int> heldButtons_;
     Tilt tilt_;
     std::string typeText_, renameText_;
+
+    // Fullscreen: only the selected device's screen, with controls that show while the mouse moves.
+    bool fullscreen_ = false;
+    double controlsShownAt_ = 0;   // ImGui::GetTime() of the last mouse activity
 
     // The Add Device page.
     std::unique_ptr<Preparation> preparation_;
@@ -304,6 +324,7 @@ void App::StartDevice(const Device &device) {
         options.webProxy = settings_.webProxy;
         options.headphones = settings_.headphones;
         options.muted = settings_.muted;
+        options.keyboard = settings_.sendKeys;
         sessions_[device.id] = std::make_unique<Session>(device, options);
         error_.clear();
     } catch (const std::exception &e) {
@@ -341,6 +362,21 @@ void App::RequestClose() {
 
 void App::Frame() {
     UpdateSessions();
+
+    // Fullscreen shows the device on screen: F11 toggles it, Esc leaves it, and it ends with the device.
+    Device *shownDevice = page_ == Page::Device ? Selected() : nullptr;
+    Session *shown = shownDevice ? SessionFor(*shownDevice) : nullptr;
+    if (ImGui::IsKeyPressed(ImGuiKey_F11, false) && !fullscreen_)
+        EnterFullscreen();
+    else if (ImGui::IsKeyPressed(ImGuiKey_F11, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+        fullscreen_ = false;
+    if (!shown || closing_)
+        fullscreen_ = false;
+    if (fullscreen_) {
+        FullscreenView(*shown);
+        return;
+    }
+
     const ImGuiViewport *viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
@@ -533,31 +569,22 @@ void App::RunningDeviceView(Device &device, Session &session) {
     HardwareKeys(session);
 }
 
-void App::DeviceScreen(Session &session, ImVec2 area) {
+// Uploads the device's newest frame, and returns the screen's size upright, in pixels. A panel wider
+// than tall (the iPad's) scans a quarter-turn from upright, so it's shown `turned`.
+ImVec2 App::ScreenSize(Session &session, bool &turned) {
     Texture &texture = textures_[session.GetDevice().id];
     if (session.UpdateFrame())
         texture.Upload(session.FramePixels(), session.FrameWidth(), session.FrameHeight(), settings_.smooth);
+    const float width = float(texture.width ? texture.width : session.screenWidth);
+    const float height = float(texture.height ? texture.height : session.screenHeight);
+    turned = width > height;
+    return turned ? ImVec2(height, width) : ImVec2(width, height);
+}
 
-    // A panel wider than tall (the iPad's) scans a quarter-turn from upright, so it's shown turned.
-    float sw = float(texture.width ? texture.width : session.screenWidth);
-    float sh = float(texture.height ? texture.height : session.screenHeight);
-    const bool turned = sw > sh;
-    if (turned)
-        std::swap(sw, sh);
-    // Fit a device-shaped bezel (screen plus room for the Home button) into the area.
-    const float side = 0.06f * sw, top = 0.16f * sh * sw / sh, bottom = 0.20f * sw;
-    const float scale = std::max(0.1f, std::min(area.x / (sw + 2 * side), area.y / (sh + top + bottom)));
-    const ImVec2 bezelSize((sw + 2 * side) * scale, (sh + top + bottom) * scale);
-    const ImVec2 cursor = ImGui::GetCursorScreenPos();
-    const ImVec2 bezel(cursor.x + (area.x - bezelSize.x) / 2, cursor.y);
-    const ImVec2 screen(bezel.x + side * scale, bezel.y + top * scale);
-    const ImVec2 screenSize(sw * scale, sh * scale);
-
+// Draws the screen into the rectangle at `screen` (its upright size scaled) and makes it touchable.
+void App::DrawScreen(Session &session, ImVec2 screen, ImVec2 screenSize, bool turned) {
+    const Texture &texture = textures_[session.GetDevice().id];
     ImDrawList *draw = ImGui::GetWindowDrawList();
-    draw->AddRectFilled(bezel, ImVec2(bezel.x + bezelSize.x, bezel.y + bezelSize.y), IM_COL32(24, 24, 27, 255),
-                        28 * scale);
-    draw->AddRect(bezel, ImVec2(bezel.x + bezelSize.x, bezel.y + bezelSize.y), IM_COL32(70, 70, 76, 255),
-                  28 * scale, 0, 2);
     const ImVec2 screenEnd(screen.x + screenSize.x, screen.y + screenSize.y);
     if (texture.id && !session.sleeping && turned)   // each corner shows the pixel the turn puts there
         draw->AddImageQuad(ImTextureID(intptr_t(texture.id)), screen, ImVec2(screenEnd.x, screen.y), screenEnd,
@@ -573,6 +600,29 @@ void App::DeviceScreen(Session &session, ImVec2 area) {
                       IM_COL32(200, 200, 200, 255), text);
     }
     ScreenTouch(session, screen, screenSize, turned);
+}
+
+// The device in its bezel, fitted into the area, with the Home button under the screen.
+void App::DeviceScreen(Session &session, ImVec2 area) {
+    bool turned;
+    const ImVec2 upright = ScreenSize(session, turned);
+    const float sw = upright.x, sh = upright.y;
+    // Fit a device-shaped bezel (screen plus room for the Home button) into the area.
+    const float side = 0.06f * sw, top = 0.16f * sh * sw / sh, bottom = 0.20f * sw;
+    const float scale = std::max(0.1f, std::min(area.x / (sw + 2 * side), area.y / (sh + top + bottom)));
+    const ImVec2 bezelSize((sw + 2 * side) * scale, (sh + top + bottom) * scale);
+    const ImVec2 cursor = ImGui::GetCursorScreenPos();
+    const ImVec2 bezel(cursor.x + (area.x - bezelSize.x) / 2, cursor.y);
+    const ImVec2 screen(bezel.x + side * scale, bezel.y + top * scale);
+    const ImVec2 screenSize(sw * scale, sh * scale);
+    const ImVec2 screenEnd(screen.x + screenSize.x, screen.y + screenSize.y);
+
+    ImDrawList *draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(bezel, ImVec2(bezel.x + bezelSize.x, bezel.y + bezelSize.y), IM_COL32(24, 24, 27, 255),
+                        28 * scale);
+    draw->AddRect(bezel, ImVec2(bezel.x + bezelSize.x, bezel.y + bezelSize.y), IM_COL32(70, 70, 76, 255),
+                  28 * scale, 0, 2);
+    DrawScreen(session, screen, screenSize, turned);
 
     // The Home button: a circle under the screen you can click (H on the keyboard does the same).
     const float radius = bottom * scale * 0.3f;
@@ -583,7 +633,7 @@ void App::DeviceScreen(Session &session, ImVec2 area) {
         session.Send({{"cmd", "button"}, {"button", QEMU_IOS_BUTTON_HOME}, {"down", true}});
     if (ImGui::IsItemDeactivated())
         session.Send({{"cmd", "button"}, {"button", QEMU_IOS_BUTTON_HOME}, {"down", false}});
-    Tooltip("Home (H)");
+    Tooltip(("Home (" + settings_.Shortcut("H") + ")").c_str());
     draw->AddCircle(home, radius, ImGui::IsItemHovered() ? IM_COL32(150, 150, 160, 255) : IM_COL32(90, 90, 96, 255),
                     0, 2);
     draw->AddRect(ImVec2(home.x - radius * 0.38f, home.y - radius * 0.38f),
@@ -631,12 +681,152 @@ void App::ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, bool turned)
     }
 }
 
-// H: Home, P: Sleep/Wake, + and -: volume (held while the key is), arrows: tilt.
+// ---- Fullscreen ------------------------------------------------------------------------------
+
+// The icons of the fullscreen controls, drawn in `ink` inside a round button of radius r at c.
+
+// Volume: a speaker with a plus or a minus beside it.
+void DrawVolumeIcon(ImDrawList *draw, ImVec2 c, float r, ImU32 ink, bool up) {
+    const float width = r * 0.11f;
+    draw->AddRectFilled(ImVec2(c.x - r * 0.52f, c.y - r * 0.15f), ImVec2(c.x - r * 0.32f, c.y + r * 0.15f), ink);
+    draw->AddQuadFilled(ImVec2(c.x - r * 0.32f, c.y - r * 0.15f), ImVec2(c.x - r * 0.06f, c.y - r * 0.40f),
+                        ImVec2(c.x - r * 0.06f, c.y + r * 0.40f), ImVec2(c.x - r * 0.32f, c.y + r * 0.15f), ink);
+    const ImVec2 sign(c.x + r * 0.32f, c.y);
+    draw->AddLine(ImVec2(sign.x - r * 0.17f, sign.y), ImVec2(sign.x + r * 0.17f, sign.y), ink, width);
+    if (up)
+        draw->AddLine(ImVec2(sign.x, sign.y - r * 0.17f), ImVec2(sign.x, sign.y + r * 0.17f), ink, width);
+}
+
+// Home, as on the device: a ring with a rounded square inside.
+void DrawHomeIcon(ImDrawList *draw, ImVec2 c, float r, ImU32 ink) {
+    const float width = r * 0.08f, half = r * 0.24f;
+    draw->AddCircle(c, r * 0.62f, ink, 0, width);
+    draw->AddRect(ImVec2(c.x - half, c.y - half), ImVec2(c.x + half, c.y + half), ink, half * 0.4f, 0, width);
+}
+
+// Sleep/Wake: the power symbol, a circle open at the top with a line through the gap.
+void DrawPowerIcon(ImDrawList *draw, ImVec2 c, float r, ImU32 ink) {
+    const float width = r * 0.11f, radius = r * 0.40f, pi = 3.14159265f, gap = 0.75f;
+    draw->PathArcTo(c, radius, -pi / 2 + gap, 3 * pi / 2 - gap, 32);
+    draw->PathStroke(ink, 0, width);
+    draw->AddLine(ImVec2(c.x, c.y - radius * 1.25f), ImVec2(c.x, c.y - radius * 0.2f), ink, width);
+}
+
+// Leave fullscreen: four corners pointing inward.
+void DrawExitFullscreenIcon(ImDrawList *draw, ImVec2 c, float r, ImU32 ink) {
+    const float width = r * 0.09f, outer = r * 0.42f, inner = r * 0.14f;
+    for (float sx : {-1.0f, 1.0f})
+        for (float sy : {-1.0f, 1.0f}) {
+            const ImVec2 corner[] = {ImVec2(c.x + sx * outer, c.y + sy * inner), ImVec2(c.x + sx * inner, c.y + sy * inner),
+                                     ImVec2(c.x + sx * inner, c.y + sy * outer)};
+            draw->AddPolyline(corner, 3, ink, 0, width);
+        }
+}
+
+// Fullscreen: the screen as large as the monitor allows, on black, with the controls over it.
+void App::FullscreenView(Session &session) {
+    const ImGuiViewport *viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->Pos);
+    ImGui::SetNextWindowSize(viewport->Size);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 1));
+    ImGui::Begin("fullscreen", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+    bool turned;
+    const ImVec2 upright = ScreenSize(session, turned);
+    const float scale = std::min(viewport->Size.x / upright.x, viewport->Size.y / upright.y);
+    const ImVec2 size(upright.x * scale, upright.y * scale);
+    DrawScreen(session,
+               ImVec2(viewport->Pos.x + (viewport->Size.x - size.x) / 2, viewport->Pos.y + (viewport->Size.y - size.y) / 2),
+               size, turned);
+    ImGui::End();
+    FullscreenControls(session);   // a window of its own, so it sits over the screen
+    HardwareKeys(session);
+}
+
+// The fullscreen controls along the bottom: Volume down and up, Home, Sleep/Wake, and Leave
+// fullscreen. They show when the mouse moves and fade out a few seconds after it stops, unless
+// it's over them.
+void App::FullscreenControls(Session &session) {
+    const ImGuiIO &io = ImGui::GetIO();
+    const double now = ImGui::GetTime();
+    if (io.MouseDelta.x != 0 || io.MouseDelta.y != 0 || ImGui::IsAnyMouseDown())
+        controlsShownAt_ = now;
+    const float alpha = std::clamp(float(controlsShownAt_ + 2.5 - now) / 0.3f, 0.0f, 1.0f);   // fades in its last 0.3 s
+    if (alpha <= 0)
+        return;
+
+    const float button = ImGui::GetFontSize() * 2.8f, gap = button * 0.3f, pad = button * 0.2f;
+    const ImVec2 size(5 * button + 5 * gap + 2 * pad, button + 2 * pad);   // 5 buttons, the last set apart
+    const ImGuiViewport *viewport = ImGui::GetMainViewport();
+    const ImVec2 at(viewport->Pos.x + (viewport->Size.x - size.x) / 2,
+                    viewport->Pos.y + viewport->Size.y - size.y - button * 0.4f);
+    ImGui::SetNextWindowPos(at);
+    ImGui::SetNextWindowSize(size);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, pad));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(gap, 0));
+    ImGui::Begin("fullscreen controls", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+    ImDrawList *draw = ImGui::GetWindowDrawList();
+    auto gray = [&](int value, int opacity) { return IM_COL32(value, value, value, int(opacity * alpha)); };
+    draw->AddRectFilled(at, ImVec2(at.x + size.x, at.y + size.y), gray(18, 215), size.y / 2);
+
+    // A round button with an icon; returns whether it was clicked.
+    auto roundButton = [&](const char *id, const std::string &tip, const std::function<void(ImVec2, float, ImU32)> &icon) {
+        const bool clicked = ImGui::InvisibleButton(id, ImVec2(button, button));
+        const ImVec2 min = ImGui::GetItemRectMin();
+        const ImVec2 c(min.x + button / 2, min.y + button / 2);
+        draw->AddCircleFilled(c, button / 2, gray(255, ImGui::IsItemActive() ? 90 : ImGui::IsItemHovered() ? 55 : 28));
+        icon(c, button / 2, gray(240, 255));
+        Tooltip(tip.c_str());
+        return clicked;
+    };
+    // A device button: held down while the mouse button is, like the real one.
+    auto deviceButton = [&](const char *id, int which, const std::string &tip, const std::function<void(ImVec2, float, ImU32)> &icon) {
+        roundButton(id, tip, icon);
+        if (ImGui::IsItemActivated())
+            session.Send({{"cmd", "button"}, {"button", which}, {"down", true}});
+        if (ImGui::IsItemDeactivated())
+            session.Send({{"cmd", "button"}, {"button", which}, {"down", false}});
+        ImGui::SameLine();
+    };
+    deviceButton("voldown", QEMU_IOS_BUTTON_VOLUME_DOWN, "Volume down (" + settings_.Shortcut("-") + ")",
+                 [&](ImVec2 c, float r, ImU32 ink) { DrawVolumeIcon(draw, c, r, ink, false); });
+    deviceButton("volup", QEMU_IOS_BUTTON_VOLUME_UP, "Volume up (" + settings_.Shortcut("+") + ")",
+                 [&](ImVec2 c, float r, ImU32 ink) { DrawVolumeIcon(draw, c, r, ink, true); });
+    deviceButton("home", QEMU_IOS_BUTTON_HOME, "Home (" + settings_.Shortcut("H") + ")",
+                 [&](ImVec2 c, float r, ImU32 ink) { DrawHomeIcon(draw, c, r, ink); });
+    deviceButton("power", QEMU_IOS_BUTTON_POWER, "Sleep/Wake (" + settings_.Shortcut("P") + "). Hold it to power off.",
+                 [&](ImVec2 c, float r, ImU32 ink) { DrawPowerIcon(draw, c, r, ink); });
+    // A thin line, then Leave fullscreen.
+    const float lineX = ImGui::GetCursorScreenPos().x;   // halfway between Sleep/Wake and Leave
+    draw->AddLine(ImVec2(lineX, at.y + pad + button * 0.2f), ImVec2(lineX, at.y + pad + button * 0.8f), gray(255, 60),
+                  1.5f);
+    ImGui::SetCursorScreenPos(ImVec2(ImGui::GetCursorScreenPos().x + gap, ImGui::GetCursorScreenPos().y));
+    if (roundButton("leave", "Leave fullscreen (F11 or Esc)",
+                    [&](ImVec2 c, float r, ImU32 ink) { DrawExitFullscreenIcon(draw, c, r, ink); }))
+        fullscreen_ = false;
+    if (ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))
+        controlsShownAt_ = now;   // stays while the mouse rests on it
+    ImGui::End();
+    ImGui::PopStyleVar(3);
+}
+
+// ---- Keyboard --------------------------------------------------------------------------------
+
+// The hardware shortcuts: H Home, P Sleep/Wake, + and - volume (held while the key is), arrows tilt.
+// While what you type goes to iOS (the "Send keyboard input to iOS" setting), they take Ctrl.
 void App::HardwareKeys(Session &session) {
     const ImGuiIO &io = ImGui::GetIO();
     const bool typing = io.WantTextInput;
-    const bool plain = !io.KeyCtrl && !io.KeyAlt && !io.KeyShift;
-    auto key = [&](ImGuiKey k) { return !typing && plain && ImGui::IsKeyDown(k); };
+    const bool modifiers = io.KeyCtrl == settings_.sendKeys && !io.KeyAlt && !io.KeyShift;
+    auto key = [&](ImGuiKey k) { return !typing && modifiers && ImGui::IsKeyDown(k); };
     const std::pair<bool, int> buttons[] = {
         {key(ImGuiKey_H), QEMU_IOS_BUTTON_HOME},
         {key(ImGuiKey_P), QEMU_IOS_BUTTON_POWER},
@@ -658,27 +848,59 @@ void App::HardwareKeys(Session &session) {
                        key(ImGuiKey_DownArrow), a))
             session.Send({{"cmd", "motion"}, {"x", a[0]}, {"y", a[1]}, {"z", a[2]}});
     }
+    SendKeys(session);
+}
+
+// With "Send keyboard input to iOS" on, what you type goes to iOS while no text box here has focus:
+// the characters as typed (Shift and AltGr included), and Backspace, Enter, Tab, Delete, Home, End
+// and the arrow keys (Esc is kept for leaving fullscreen).
+void App::SendKeys(Session &session) {
+    const ImGuiIO &io = ImGui::GetIO();
+    if (!settings_.sendKeys || io.WantTextInput)
+        return;
+    std::wstring text;
+    for (ImWchar c : io.InputQueueCharacters)
+        if (c >= 0x20 && c != 0x7f)   // not control characters (Ctrl+H and the like come as these)
+            text += wchar_t(c);
+    if (!text.empty())
+        session.Send({{"cmd", "key"}, {"text", Narrow(text)}});
+    if (io.KeyCtrl || io.KeyAlt)
+        return;   // Ctrl+arrows tilt; Alt is for the second finger
+    static const std::pair<ImGuiKey, const char *> keys[] = {
+        {ImGuiKey_Backspace, "backspace"}, {ImGuiKey_Enter, "enter"}, {ImGuiKey_KeypadEnter, "enter"},
+        {ImGuiKey_Tab, "tab"},             {ImGuiKey_Delete, "delete"}, {ImGuiKey_Home, "home"},
+        {ImGuiKey_End, "end"},             {ImGuiKey_LeftArrow, "left"}, {ImGuiKey_RightArrow, "right"},
+        {ImGuiKey_UpArrow, "up"},          {ImGuiKey_DownArrow, "down"},
+    };
+    for (const auto &[key, name] : keys)
+        if (ImGui::IsKeyPressed(key))   // repeats while held, as typing does
+            session.Send({{"cmd", "key"}, {"key", name}});
 }
 
 void App::Controls(Session &session) {
     const bool ready = session.state == "running" || session.state == "paused";
-    auto pressButton = [&](const char *label, int button, const char *tip) {
+    auto pressButton = [&](const char *label, int button, const std::string &tip) {
         ImGui::Button(label);
         if (ImGui::IsItemActivated())
             session.Send({{"cmd", "button"}, {"button", button}, {"down", true}});
         if (ImGui::IsItemDeactivated())
             session.Send({{"cmd", "button"}, {"button", button}, {"down", false}});
-        Tooltip(tip);
+        Tooltip(tip.c_str());
         ImGui::SameLine();
     };
     ImGui::BeginDisabled(!ready);
-    pressButton("Home", QEMU_IOS_BUTTON_HOME, "Home button (H)");
-    pressButton("Sleep/Wake", QEMU_IOS_BUTTON_POWER, "Sleep/Wake button (P). Hold it to power off.");
-    pressButton("Vol -", QEMU_IOS_BUTTON_VOLUME_DOWN, "Volume down (-)");
-    pressButton("Vol +", QEMU_IOS_BUTTON_VOLUME_UP, "Volume up (+)");
+    pressButton("Home", QEMU_IOS_BUTTON_HOME, "Home button (" + settings_.Shortcut("H") + ")");
+    pressButton("Sleep/Wake", QEMU_IOS_BUTTON_POWER,
+                "Sleep/Wake button (" + settings_.Shortcut("P") + "). Hold it to power off.");
+    pressButton("Vol -", QEMU_IOS_BUTTON_VOLUME_DOWN, "Volume down (" + settings_.Shortcut("-") + ")");
+    pressButton("Vol +", QEMU_IOS_BUTTON_VOLUME_UP, "Volume up (" + settings_.Shortcut("+") + ")");
     if (ImGui::Button(session.paused ? "Resume" : "Pause"))
         session.Send({{"cmd", "pause"}, {"paused", !session.paused}});
     ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Fullscreen"))
+        EnterFullscreen();
+    Tooltip("Only the screen, on the whole monitor (F11). F11 or Esc leaves it.");
 
     bool sound = !session.muted;
     if (ImGui::Checkbox("Sound", &sound)) {
@@ -710,11 +932,16 @@ void App::Controls(Session &session) {
         session.Stop();
     Tooltip("Shuts iOS down cleanly, like sliding to power off.");
 
-    // Typing: the text goes to the field that has focus in iOS.
-    ImGui::BeginDisabled(!ready || session.agent != 1);
+    // Typing: the text goes to the field that has focus in iOS, through a USB keyboard plugged into
+    // the device where it has a USB host, else through the guest tools (worker.h).
+    ImGui::BeginDisabled(!ready || (!session.usbKeyboard && session.agent != 1));
     ImGui::SetNextItemWidth(-ImGui::CalcTextSize("Type").x - ImGui::GetStyle().FramePadding.x * 2 - 8);
     bool enter = ImGui::InputTextWithHint("##type", "Type into iOS (Enter sends)", &typeText_,
                                           ImGuiInputTextFlags_EnterReturnsTrue);
+    Tooltip(session.usbKeyboard
+                ? "Typed on a USB keyboard plugged into the device for it, as on a US keyboard (characters it has "
+                  "no key for are skipped). iOS hides its on-screen keyboard while it's plugged in."
+                : "Typed into the text field that has focus in iOS, by the guest tools.");
     ImGui::SameLine();
     if ((ImGui::Button("Type") || enter) && !typeText_.empty()) {
         session.Send({{"cmd", "type"}, {"text", typeText_}});
@@ -756,14 +983,28 @@ void App::SettingsPage() {
     DimText("DISPLAY AND CONTROLS");
     changed |= ImGui::Checkbox("Smooth scaling", &settings_.smooth);
     changed |= ImGui::Checkbox("Arrow keys tilt the device", &settings_.tilt);
+    if (ImGui::Checkbox("Send keyboard input to iOS", &settings_.sendKeys)) {
+        changed = true;
+        for (auto &[id, session] : sessions_)   // the iPad's USB keyboard follows the setting
+            session->Send({{"cmd", "keyboard"}, {"on", settings_.sendKeys}});
+    }
+    Tooltip("What you type while a device is on screen goes to iOS, as on a US keyboard. The shortcuts then take "
+            "Ctrl (Ctrl+H for Home, and so on). On the iPad, a USB keyboard stays plugged in for it, so iOS hides "
+            "its on-screen keyboard.");
     if (changed)
         settings_.Save();
 
     ImGui::Spacing();
     DimText("CONTROLS");
     ImGui::BulletText("Click and drag on the screen to touch. Hold Alt while dragging to pinch or rotate.");
-    ImGui::BulletText("H: Home, P: Sleep/Wake, + and -: volume, arrow keys: tilt.");
-    ImGui::BulletText("Type text into iOS with the box under the device.");
+    if (settings_.sendKeys) {
+        ImGui::BulletText("What you type goes to iOS while a device is on screen.");
+        ImGui::BulletText("Ctrl+H: Home, Ctrl+P: Sleep/Wake, Ctrl with + and -: volume, Ctrl with the arrow keys: tilt.");
+    } else {
+        ImGui::BulletText("H: Home, P: Sleep/Wake, + and -: volume, arrow keys: tilt.");
+        ImGui::BulletText("Type text into iOS with the box under the device.");
+    }
+    ImGui::BulletText("F11: fullscreen. F11 or Esc leaves it.");
     ImGui::Spacing();
     DimText("FOLDERS");
     ImGui::Text("Data: %s", PathText(DataDir()).c_str());
@@ -1344,7 +1585,8 @@ void App::ClosingOverlay() {
 // ---- Window and OpenGL -----------------------------------------------------------------------
 
 // For testing the UI where nobody watches the screen: IOS_EMULATOR_UI_START=1 starts the selected
-// device, IOS_EMULATOR_UI_PAGE=add opens the Add Device page, and IOS_EMULATOR_UI_SHOT=<file.png> saves the window after IOS_EMULATOR_UI_SHOT_AFTER
+// device (IOS_EMULATOR_UI_FULLSCREEN=1 also shows it fullscreen), IOS_EMULATOR_UI_PAGE=add opens the
+// Add Device page, and IOS_EMULATOR_UI_SHOT=<file.png> saves the window after IOS_EMULATOR_UI_SHOT_AFTER
 // seconds (default 5) and closes the app.
 std::string EnvText(const char *name) {
     const char *value = getenv(name);
@@ -1389,6 +1631,26 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         return 0;
     }
     return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+// Fullscreen: the window loses its frame and covers its monitor. Leaving puts it back as it was
+// (size, position, maximized or not).
+void SetFullscreen(HWND hwnd, bool on) {
+    static WINDOWPLACEMENT before = {sizeof before};
+    if (on) {
+        GetWindowPlacement(hwnd, &before);
+        MONITORINFO monitor = {sizeof monitor};
+        GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor);
+        const RECT &area = monitor.rcMonitor;
+        SetWindowLongW(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+        SetWindowPos(hwnd, HWND_TOP, area.left, area.top, area.right - area.left, area.bottom - area.top,
+                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+    } else {
+        SetWindowLongW(hwnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+        SetWindowPlacement(hwnd, &before);
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    }
 }
 
 void SetupStyle(float scale) {
@@ -1469,9 +1731,11 @@ int RunUi() {
         const uint64_t started = NowNs();
         if (EnvText("IOS_EMULATOR_UI_START") == "1")
             app.StartSelected();
+        if (EnvText("IOS_EMULATOR_UI_FULLSCREEN") == "1")
+            app.EnterFullscreen();
         if (EnvText("IOS_EMULATOR_UI_PAGE") == "add")
             app.ShowAddDevice();
-        bool shotTaken = false;
+        bool shotTaken = false, fullscreen = false;
         while (!app.Finished()) {
             // Idle politely: with no device running, wait for input (or a periodic refresh).
             if (!app.Busy())
@@ -1491,6 +1755,10 @@ int RunUi() {
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
             app.Frame();
+            if (app.Fullscreen() != fullscreen) {
+                fullscreen = app.Fullscreen();
+                SetFullscreen(hwnd, fullscreen);
+            }
             ImGui::Render();
             glViewport(0, 0, g_width, g_height);
             glClearColor(0.12f, 0.13f, 0.15f, 1);
