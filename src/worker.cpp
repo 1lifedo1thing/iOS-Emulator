@@ -5,6 +5,7 @@
 #include "library.h"
 #include "proxy.h"
 #include "services.h"
+#include "snapshot.h"
 
 #include <mmsystem.h>
 
@@ -88,9 +89,9 @@ private:
 class Worker {
 public:
     Worker(Device device, const std::string &framesName, HANDLE events, bool internet, bool webProxy, bool headphones,
-           bool muted)
+           bool muted, fs::path snapshot, bool saveSnapshots)
         : device_(std::move(device)), events_(events), internet_(internet), webProxy_(webProxy), headphones_(headphones),
-          muted_(muted) {
+          muted_(muted), snapshot_(std::move(snapshot)), saveSnapshots_(saveSnapshots) {
         frames_.Open(framesName);
     }
 
@@ -122,6 +123,7 @@ private:
     void StartWebProxy(BootOptions &options);
     void UpdateWebProxy();
     void TrustWebProxy();
+    Json SaveSnapshot(const std::string &name);
     AgentReply Agent(const std::string &op, const std::string &argument, const std::string &body,
                      std::chrono::milliseconds timeout = 30s);
 
@@ -132,6 +134,9 @@ private:
     std::atomic<bool> internet_, webProxy_;
     bool headphones_;
     std::atomic<bool> muted_;
+    fs::path snapshot_;                      // restore this snapshot folder (a throwaway run); empty: boot
+    bool saveSnapshots_;                     // "snapshot.save" may save the machine (through qemu's monitor)
+    int monitorPort_ = 0;                    // qemu's monitor, when saveSnapshots_
 
     std::mutex eventsMutex_;                 // one writer at a time on the events pipe
     std::atomic<bool> done_{false};          // qemu_ios_main returned
@@ -216,7 +221,20 @@ int Worker::Run() {
     options.internet = internet_;
     options.headphones = headphones_;
     StartWebProxy(options);
+    // Snapshots (snapshot.h): a run from one works on a throwaway copy of its disk and restores
+    // the machine instead of booting it; a run that saves them gets qemu's monitor.
+    std::vector<std::string> snapshotArgs;
+    if (!snapshot_.empty()) {
+        if (device_.stateDir.empty())   // never overwrite the device's own state\ with the snapshot's
+            throw std::runtime_error("A run from a snapshot needs a throwaway state folder (--state)");
+        snapshotArgs = RestoreSnapshot(snapshot_, device_.State());
+    }
+    if (saveSnapshots_) {
+        std::vector<std::string> monitor = MonitorArgs(monitorPort_);
+        snapshotArgs.insert(snapshotArgs.end(), monitor.begin(), monitor.end());
+    }
     std::vector<std::string> args = BuildBootArgs(device_, options);
+    args.insert(args.end(), snapshotArgs.begin(), snapshotArgs.end());
     // For engine debugging: IOS_EMULATOR_ENGINE_ARGS adds QEMU options, separated by spaces
     // (e.g. "-trace enable=ipod_touch_multitouch_log").
     if (const char *extra = getenv("IOS_EMULATOR_ENGINE_ARGS")) {
@@ -249,12 +267,14 @@ int Worker::Run() {
     audio.join();
 
     const bool storageFailed = engine_->storageFailed();
-    const bool clean = engine_->shutdownConfirmed() && exitCode_ == 0 && !storageFailed;
+    const bool throwaway = !snapshot_.empty();   // its state is discarded: no iOS shutdown needed
+    const bool clean = (throwaway || engine_->shutdownConfirmed()) && exitCode_ == 0 && !storageFailed;
     if (clean)
         fs::remove(device_.State() / ".dirty");
-    std::string message = clean            ? "iOS shut down cleanly."
-                          : storageFailed  ? "The device's storage failed; see the worker log."
-                                           : "The device stopped without shutting iOS down.";
+    std::string message = storageFailed ? "The device's storage failed; see the worker log."
+                          : !clean      ? "The device stopped without shutting iOS down."
+                          : throwaway   ? "The snapshot run ended; its changes were discarded."
+                                        : "iOS shut down cleanly.";
     Log("%s (engine exit code %d)", message.c_str(), exitCode_.load());
     Send({{"event", "exit"}, {"clean", clean}, {"message", message}});
     return clean ? 0 : 2;
@@ -509,6 +529,8 @@ void Worker::HandleDeveloperCommand(const Json &command) {
                     services_.StartSyslog([this](const std::string &line) { Send({{"event", "log"}, {"line", line}}); });
                 else
                     services_.StopSyslog();
+            } else if (cmd == "snapshot.save") {
+                result = SaveSnapshot(command.at("name").get<std::string>());
             } else if (cmd == "forward") {
                 if (command.value("on", false))
                     services_.StartForward(command.value("port", 2222), command.value("devicePort", 22));
@@ -537,6 +559,10 @@ void Worker::Shutdown() {
     if (!waitFor([&] { return engine_->ready(); }, 120s) || done_)
         return;
     engine_->cancelInput();
+    if (!snapshot_.empty()) {   // a run from a snapshot is thrown away: no need to shut iOS down
+        engine_->quit();
+        return;
+    }
     if (engine_->paused())
         engine_->resume();
     // The guest agent performs the clean power-off; give a guest that is still booting time to start it.
@@ -553,6 +579,29 @@ void Worker::Shutdown() {
     Log(engine_->shutdownConfirmed() ? "Stopping: iOS has halted" : "Stopping: iOS didn't halt in time");
     engine_->cancelInput();
     engine_->quit();
+}
+
+// Saves the running machine and its disk to <device>\snapshots\<name>\ (snapshot.h).
+Json Worker::SaveSnapshot(const std::string &name) {
+    if (!monitorPort_)
+        throw std::runtime_error("This run can't save snapshots (the worker needs --save-snapshots)");
+    if (name.empty() || name.find_first_of("\\/:*?\"<>|") != std::string::npos || name.find("..") != std::string::npos)
+        throw std::runtime_error("Not a valid snapshot name: " + name);
+    engine_->cancelInput();   // a touch held across the save would stay held in every restore
+    // Whether the display sleeps isn't in the snapshot, so a restored run couldn't tell that it
+    // must wake it before touching: wake it now (with Home, never Sleep/Wake).
+    if (engine_->displaySleeping()) {
+        engine_->button(QEMU_IOS_BUTTON_HOME, true);
+        std::this_thread::sleep_for(150ms);
+        engine_->button(QEMU_IOS_BUTTON_HOME, false);
+        std::this_thread::sleep_for(1500ms);
+    }
+    const fs::path folder = device_.Snapshot(name);
+    const auto start = std::chrono::steady_clock::now();
+    ::SaveSnapshot(monitorPort_, device_.State(), folder);
+    Log("Saved the snapshot %s in %.1f s", PathText(folder).c_str(),
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+    return {{"path", PathText(folder)}, {"bytes", fs::file_size(folder / "machine.state")}};
 }
 
 // The web proxy listens before iOS boots; the engine forwards the guest's 10.0.2.100:3128 to it.
@@ -639,9 +688,9 @@ Worker::AgentReply Worker::Agent(const std::string &op, const std::string &argum
 }  // namespace
 
 int RunWorker(const std::vector<std::string> &args) {
-    std::string deviceDir, framesName;
+    std::string deviceDir, framesName, snapshot, stateDir;
     HANDLE events = nullptr;
-    bool internet = false, webProxy = false, headphones = false, muted = false;
+    bool internet = false, webProxy = false, headphones = false, muted = false, saveSnapshots = false;
     for (size_t i = 0; i < args.size(); i++) {
         const std::string &arg = args[i];
         const bool hasValue = i + 1 < args.size();
@@ -659,15 +708,24 @@ int RunWorker(const std::vector<std::string> &args) {
             headphones = true;
         else if (arg == "--muted")
             muted = true;
+        else if (arg == "--snapshot" && hasValue)
+            snapshot = args[++i];
+        else if (arg == "--save-snapshots")
+            saveSnapshots = true;
+        else if (arg == "--state" && hasValue)
+            stateDir = args[++i];
     }
     if (deviceDir.empty() || framesName.empty() || !events) {
         Log("usage: iOS-Emulator --worker --device <dir> --frames <name> --events <handle> [--internet] "
-            "[--web-proxy] [--headphones] [--muted]");
+            "[--web-proxy] [--headphones] [--muted] [--snapshot <folder> --state <dir>] [--save-snapshots]");
         return 64;
     }
     try {
-        Worker worker(OpenDevice(fs::path(Widen(deviceDir))), framesName, events, internet, webProxy, headphones,
-                      muted);
+        Device device = OpenDevice(fs::path(Widen(deviceDir)));
+        if (!stateDir.empty())
+            device.stateDir = fs::path(Widen(stateDir));
+        Worker worker(std::move(device), framesName, events, internet, webProxy, headphones, muted,
+                      snapshot.empty() ? fs::path() : fs::path(Widen(snapshot)), saveSnapshots);
         return worker.Run();
     } catch (const std::exception &e) {
         Log("Worker failed: %s", e.what());

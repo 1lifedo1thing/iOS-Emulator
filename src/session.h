@@ -21,6 +21,8 @@ struct SessionOptions {
     bool webProxy = true;     // HTTPS through the web proxy's bridge (proxy.h)
     bool headphones = false;
     bool muted = false;
+    fs::path snapshot;        // start from this snapshot folder instead of booting (a throwaway run, snapshot.h)
+    bool saveSnapshots = false;   // let "snapshot.save" requests save the machine (opens qemu's monitor locally)
 };
 
 class Session {
@@ -76,6 +78,7 @@ private:
 
     Device device_;
     ChildProcess usbmuxd_, worker_;
+    fs::path throwawayState_;   // a run from a snapshot: the worker's copy of its disk
     std::thread usbmuxdDrain_, eventReader_;
     std::string usbmuxClientPort_, usbmuxGuestPort_, usbmuxPid_, usbmuxCreated_;
 

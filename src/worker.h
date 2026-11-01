@@ -25,6 +25,12 @@
 //     {"cmd":"shell","command":"ls /","sh":true}             runs as root; result {status, output}
 //     {"cmd":"syslog","on":true}                             streams "log" events
 //     {"cmd":"forward","on":true,"port":2222,"devicePort":22}
+//     {"cmd":"snapshot.save","name":"booted"}                saves the machine to <device>\snapshots\<name>\
+//                                                            (snapshot.h); result {path, bytes}; needs --save-snapshots
+//
+// Started with --snapshot <folder>, the worker restores that snapshot instead of booting, on a
+// throwaway copy of its disk: nothing the guest writes is kept, and "stop" quits at once instead
+// of shutting iOS down.
 //
 // Events (worker -> UI), each with an "event" field:
 //   board   {machine, width, height, capabilities}       once, before booting
@@ -41,5 +47,6 @@
 
 // Runs a worker with the arguments after "--worker". Returns the process exit code.
 //   --device <dir>  --frames <mapping name>  --events <pipe handle>
-//   [--internet] [--web-proxy] [--headphones] [--muted]
+//   [--internet] [--web-proxy] [--headphones] [--muted] [--save-snapshots]
+//   [--snapshot <folder> --state <dir>]   restore a snapshot, using <dir> as the throwaway state folder
 int RunWorker(const std::vector<std::string> &args);

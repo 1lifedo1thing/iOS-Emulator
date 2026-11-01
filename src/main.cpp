@@ -7,12 +7,16 @@
 //   iOS-Emulator.exe --run <device> [--seconds N] [--screenshot file.png] [--internet] [--no-web-proxy]
 //                    [--tap x,y,t ...] [--swipe x,y,toX,toY,t[,seconds] ...]
 //                    [--request t json ...] [--send t json ...] [--shot t file.png ...]
+//                    [--save-snapshot t name] [--snapshot name]
 //                                          boots a device without a window (for testing and scripts);
 //                                          --no-web-proxy lets iOS connect to websites itself (proxy.h);
 //                                          --tap/--swipe touch the screen (coordinates 0..1) t seconds after start;
 //                                          --request sends a developer command (worker.h) and prints the reply;
 //                                          --send sends any other command (e.g. {"cmd":"type","text":"hi"});
-//                                          --shot saves the screen t seconds after start
+//                                          --shot saves the screen t seconds after start;
+//                                          --save-snapshot saves the machine t seconds after start;
+//                                          --snapshot starts from a saved machine instead of booting,
+//                                          on a throwaway copy of its disk (worker.h), in seconds
 //   iOS-Emulator.exe --keyboard shot.png   prints what typing reads off a screenshot (keyboard.h)
 //   iOS-Emulator.exe --catalog [product]   lists the firmwares that can be prepared
 //   iOS-Emulator.exe --prepare <firmware id> [--name N] [--jailbreak] [--ipsw file]
@@ -76,7 +80,7 @@ static int RunCommand(const std::vector<std::string> &args) {
         double at;
         std::string file;
     };
-    std::string name, screenshot, typingProblem;
+    std::string name, screenshot, typingProblem, snapshot;
     std::vector<Gesture> gestures;
     std::vector<Command> commands;
     std::vector<Shot> shots;
@@ -96,7 +100,13 @@ static int RunCommand(const std::vector<std::string> &args) {
         } else if (args[i] == "--shot" && i + 2 < args.size()) {
             const double at = atof(args[++i].c_str());
             shots.push_back({at, args[++i]});
-        } else if (args[i] == "--seconds" && i + 1 < args.size())
+        } else if (args[i] == "--save-snapshot" && i + 2 < args.size()) {
+            const double at = atof(args[++i].c_str());
+            commands.push_back({at, {{"cmd", "snapshot.save"}, {"name", args[++i]}}, true});
+            options.saveSnapshots = true;
+        } else if (args[i] == "--snapshot" && i + 1 < args.size())
+            snapshot = args[++i];
+        else if (args[i] == "--seconds" && i + 1 < args.size())
             seconds = std::stoi(args[++i]);
         else if (args[i] == "--screenshot" && i + 1 < args.size())
             screenshot = args[++i];
@@ -108,7 +118,13 @@ static int RunCommand(const std::vector<std::string> &args) {
             name = args[i];
     }
     Device device = FindDevice(name);
-    Print("Starting " + device.name + " (" + device.Product() + ", iOS " + device.Version() + ")");
+    if (!snapshot.empty()) {
+        options.snapshot = device.Snapshot(snapshot);
+        if (!fs::exists(options.snapshot / "machine.state"))
+            throw std::runtime_error("No snapshot " + snapshot + " for " + device.name);
+    }
+    Print((snapshot.empty() ? "Starting " : "Restoring " + snapshot + " on ") + device.name + " (" +
+          device.Product() + ", iOS " + device.Version() + ")");
     Session session(device, options);
     std::string lastState;
     const auto start = std::chrono::steady_clock::now();
@@ -276,7 +292,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             Print("Imported " + device.name + " as " + device.id);
             return 0;
         }
-        Print("usage: iOS-Emulator [--list | --run <device> [--seconds N] [--screenshot F] [--internet] [--no-web-proxy] | "
+        Print("usage: iOS-Emulator [--list | --run <device> [--seconds N] [--screenshot F] [--internet] [--no-web-proxy] "
+              "[--save-snapshot T NAME] [--snapshot NAME] | "
               "--catalog | --prepare <firmware> [--jailbreak] | --import <folder>]");
         return 64;
     } catch (const std::exception &e) {

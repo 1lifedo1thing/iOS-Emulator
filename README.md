@@ -102,6 +102,7 @@ iOS-Emulator --import <LightTouch device folder>       copies a LightTouch devic
 iOS-Emulator --run <device> [--seconds N] [--screenshot shot.png] [--internet] [--no-web-proxy]
              [--tap x,y,t] [--swipe x,y,toX,toY,t[,seconds]]
              [--request t '<json>'] [--send t '<json>'] [--shot t shot.png]
+             [--save-snapshot t NAME] [--snapshot NAME]
 iOS-Emulator --keyboard shot.png                       what typing reads off a screenshot
 ```
 
@@ -117,6 +118,11 @@ prints its reply; `--send` sends any command without waiting, for example
 ```
 iOS-Emulator --run "My iPod" --seconds 120 --request 90 "{\"cmd\":\"shell\",\"command\":\"ls /var/mobile\"}"
 ```
+
+To test without waiting for a boot, save the running machine once with `--save-snapshot 90 booted`
+(at 90 s, under the name `booted`), then start later runs with `--snapshot booted`: iOS is back where
+it was within seconds. Such a run works on a throwaway copy of the snapshot's storage, so the device
+itself is never changed and every run starts the same.
 
 In Windows PowerShell 5.1, JSON containing spaces gets mangled on the way to the program; put such a
 command line in a `.cmd` file instead.
@@ -161,12 +167,13 @@ iOS-Emulator.exe (the window)                 iOS-Emulator.exe --worker (one per
 | `src/proxy.cpp` | The guest's web proxy (OpenSSL) |
 | `src/firmware.cpp` | The firmware catalog, downloads and firmwarekit |
 | `src/library.cpp` | Devices on disk |
+| `src/snapshot.cpp` | Saving a running machine and starting from it (for quick test runs) |
 | `src/common.cpp` | Shared helpers: folders, files, hashing, child processes, shared frames |
 
 ### Where things are
 
 `%LOCALAPPDATA%\iOS-Emulator` holds `library\records\<id>\` (one folder per device: `base\` as prepared,
-`state\` with everything it wrote, `record.json`), `pairing\` (USB pairing records), `network\<id>\`
+`state\` with everything it wrote, `snapshots\`, `record.json`), `pairing\` (USB pairing records), `network\<id>\`
 (each device's web proxy certificate), `logs\` (`app.log`, `worker-*.log`, `usbmuxd-*.log`,
 `firmwarekit.log`) and `settings.json`. Screenshots go to `Pictures\iOS-Emulator`.
 

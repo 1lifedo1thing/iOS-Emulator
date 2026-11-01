@@ -6,6 +6,8 @@
 //       base\         the prepared system from firmwarekit; never written after preparation
 //       state\        everything the device writes: its NAND overlay, NOR copy, logs
 //       assets\       extra boot files (the boot ROM for the oldest boards)
+//       snapshots\<name>\   saved machines for quick test runs: machine.state + a copy of state\
+//                           (iOS-Emulator --run --save-snapshot / --snapshot, see main.cpp)
 #pragma once
 
 #include "common.h"
@@ -16,10 +18,12 @@ struct Device {
     std::string board;   // the board ID, e.g. "n18ap"
     std::string build;   // the iOS build, e.g. "8C148"
     fs::path dir;
+    fs::path stateDir;   // set for a run from a snapshot: a throwaway copy used instead of state\
 
     fs::path Base() const { return dir / "base"; }
-    fs::path State() const { return dir / "state"; }
+    fs::path State() const { return stateDir.empty() ? dir / "state" : stateDir; }
     fs::path Assets() const { return dir / "assets"; }
+    fs::path Snapshot(const std::string &name) const { return dir / "snapshots" / name; }
 
     Json Lock() const;                // base\device.lock.json, the facts firmwarekit recorded
     std::string Product() const;      // "iPod touch 3G"

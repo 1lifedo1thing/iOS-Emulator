@@ -30,6 +30,10 @@ Session::~Session() {
     if (eventsRead_)
         CloseHandle(eventsRead_);
     StopUsbmuxd();
+    if (!throwawayState_.empty()) {   // the engine keeps its files open until the worker has exited
+        std::error_code ignored;
+        fs::remove_all(throwawayState_, ignored);
+    }
 }
 
 fs::path Session::WorkerLog() const { return LogsDir() / ("worker-" + device_.id.substr(0, 8) + ".log"); }
@@ -128,6 +132,13 @@ void Session::StartWorker(const SessionOptions &options) {
         launch.args.push_back(L"--headphones");
     if (options.muted)
         launch.args.push_back(L"--muted");
+    if (!options.snapshot.empty()) {   // the worker runs on a throwaway copy, deleted once it has exited
+        throwawayState_ = fs::temp_directory_path() / ("ios-emulator-" + device_.id.substr(0, 8) + "-" + RandomHex(4));
+        launch.args.insert(launch.args.end(),
+                           {L"--snapshot", options.snapshot.wstring(), L"--state", throwawayState_.wstring()});
+    }
+    if (options.saveSnapshots)
+        launch.args.push_back(L"--save-snapshots");
     // The engine and the USB libraries read these with getenv(), once, so they go in the
     // environment the worker starts with.
     launch.env = {
