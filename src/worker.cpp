@@ -1,7 +1,6 @@
 #include "worker.h"
 
 #include "engine.h"
-#include "keyboard.h"
 #include "library.h"
 #include "proxy.h"
 #include "services.h"
@@ -84,6 +83,36 @@ private:
     std::vector<char> memory_[kBuffers];
 };
 
+// ---- Typing ----------------------------------------------------------------------------------
+
+// The most text one "type" request carries (the guest agent takes up to 64 KiB).
+constexpr size_t kTypeChunk = 16384;
+
+// What a failed input request to the guest agent ("type", "backspace", "uidump") means. The guest
+// reports Darwin errno values; the engine reports its own timeout with Windows' ETIMEDOUT (138).
+std::string InputError(int status, const std::string &body) {
+    if (status == -1 && body.empty())
+        return "The guest tools aren't running yet.";
+    switch (-status) {
+    case 13:   // EACCES
+        return "iOS is locked. Unlock it first.";
+    case 19:   // ENODEV
+        return "No text field has focus. Tap one in iOS first.";
+    case 35:   // EAGAIN
+        return "The app in front isn't ready for input yet. Try again.";
+    case 3:    // ESRCH
+        return "No app is in front.";
+    case 78:   // ENOSYS
+        return "The text field that has focus doesn't take typed text.";
+    case 60:   // ETIMEDOUT (guest)
+    case 138:  // ETIMEDOUT (engine)
+        return "it_typein didn't answer. Devices prepared before typing used it don't have it: prepare the "
+               "device again.";
+    default:
+        return "The guest tools failed (status " + std::to_string(status) + ").";
+    }
+}
+
 // ---- The worker ------------------------------------------------------------------------------
 
 class Worker {
@@ -113,10 +142,12 @@ private:
     void AudioThread();
     void CommandThread();
     void BackgroundThread();
+    void TypingThread();
 
     void HandleCommand(const Json &command);
     void HandleDeveloperCommand(const Json &command);
-    uint64_t Touch(const std::vector<QemuIosPortableContact> &contacts);
+    void Touch(const std::vector<QemuIosPortableContact> &contacts);
+    void TypeText(const std::string &text);
     void PublishFrame();
     void SendStatusIfChanged();
     void Shutdown();
@@ -150,7 +181,6 @@ private:
     uint64_t frameSerial_ = 0;
     std::string lastStatus_;
 
-    std::mutex touchMutex_;                  // the mouse and the on-screen keyboard both touch
     uint64_t touchId_ = 0;                   // every touch batch gets a new, increasing id
     uint64_t motionTime_ = 0;
 
@@ -166,9 +196,9 @@ private:
     std::unique_ptr<WebProxy> proxy_;        // the guest's web proxy (proxy.h); null if it couldn't start
     std::atomic<bool> trusting_{false};      // its certificate is installed in iOS, or being installed
 
-    // Types by tapping iOS's on-screen keyboard (keyboard.h). Declared last, so it's destroyed
-    // first: its thread touches through this worker.
-    std::unique_ptr<OnScreenKeyboard> keyboard_;
+    std::mutex typingMutex_;                 // text the "type" commands queued, not yet typed
+    std::condition_variable typingReady_;
+    std::string typing_;
 };
 
 void Worker::Send(const Json &event) {
@@ -194,22 +224,6 @@ void Worker::Background(std::function<void()> task) {
 int Worker::Run() {
     engine_ = std::make_unique<Engine>(ResourcesDir() / "libqemu-arm.dll");
     QemuIosPortableBoard board = engine_->FindBoard(device_.board);
-    keyboard_ = std::make_unique<OnScreenKeyboard>(
-        *engine_,
-        [this](double x, double y, int phase) {
-            QemuIosPortableContact contact{};
-            contact.size = sizeof contact;
-            contact.version = 1;
-            contact.contact_id = 9;   // a finger of its own, apart from the mouse's (1 and 2)
-            contact.phase = uint32_t(phase);
-            contact.x = x;
-            contact.y = y;
-            return Touch({contact});
-        },
-        [this](const std::string &message) {
-            Log("Typing: %s", message.c_str());
-            Send({{"event", "typing"}, {"message", message}});
-        });
     Send({{"event", "board"},
           {"machine", board.machine},
           {"width", board.width},
@@ -261,6 +275,7 @@ int Worker::Run() {
     std::thread audio(&Worker::AudioThread, this);
     std::thread(&Worker::CommandThread, this).detach();      // blocked reading stdin; ends with the process
     std::thread(&Worker::BackgroundThread, this).detach();
+    std::thread(&Worker::TypingThread, this).detach();
 
     guest.join();
     publisher.join();
@@ -399,6 +414,48 @@ void Worker::BackgroundThread() {
     }
 }
 
+// Types the text the "type" commands queued. Whatever is queued while a request is under way goes
+// out together in the next one, so fast typing (a keystroke per command) doesn't fall behind.
+void Worker::TypingThread() {
+    for (;;) {
+        std::string text;
+        {
+            std::unique_lock<std::mutex> lock(typingMutex_);
+            typingReady_.wait(lock, [&] { return !typing_.empty(); });
+            text.swap(typing_);
+        }
+        TypeText(text);
+    }
+}
+
+// Types through it_typein, a library the guest tools load into every app (and SpringBoard): the
+// guest agent's "type" op hands it text, which it inserts into the text field that has focus, and
+// "backspace" deletes one character. '\b' in the text is a backspace; '\n' is typed as a line
+// break, which a one-line field takes as Return. On a failure the rest of the text is dropped and
+// a "typing" event tells why.
+void Worker::TypeText(const std::string &text) {
+    size_t start = 0;
+    while (start < text.size()) {
+        AgentReply reply;
+        if (text[start] == '\b') {
+            reply = Agent("backspace", "", "", 10s);
+            start++;
+        } else {
+            size_t end = std::min({text.find('\b', start), text.size(), start + kTypeChunk});
+            while (end < text.size() && end > start + 1 && (uint8_t(text[end]) & 0xC0) == 0x80)
+                end--;   // don't split a UTF-8 character
+            reply = Agent("type", "", text.substr(start, end - start), 10s);
+            start = end;
+        }
+        if (reply.status != 0) {
+            const std::string message = InputError(reply.status, reply.body);
+            Log("Typing: %s (status %d)", message.c_str(), reply.status);
+            Send({{"event", "typing"}, {"message", message}});
+            return;
+        }
+    }
+}
+
 void Worker::HandleCommand(const Json &command) {
     const std::string cmd = command.value("cmd", "");
     const bool ready = engine_ && engine_->ready() && !done_;
@@ -421,12 +478,9 @@ void Worker::HandleCommand(const Json &command) {
             contacts.push_back(contact);
         }
         Touch(contacts);
-        keyboard_->Touched();   // a touch, a button or a turn may change the keyboard in iOS
     } else if (cmd == "button" && ready) {
         engine_->button(command.at("button").get<int>(), command.at("down").get<bool>());
-        keyboard_->Touched();
     } else if (cmd == "motion" && ready) {
-        keyboard_->Touched();
         QemuIosPortableMotion motion{};
         motion.size = sizeof motion;
         motion.version = 1;
@@ -451,7 +505,9 @@ void Worker::HandleCommand(const Json &command) {
         if (webProxy_ && ready && engine_->agentStatus() == 1)
             TrustWebProxy();
     } else if (cmd == "type") {
-        keyboard_->Type(command.value("text", ""));
+        std::lock_guard<std::mutex> lock(typingMutex_);
+        typing_ += command.value("text", "");
+        typingReady_.notify_one();
     } else if (ready && command.contains("id")) {
         HandleDeveloperCommand(command);
     } else {
@@ -459,10 +515,8 @@ void Worker::HandleCommand(const Json &command) {
     }
 }
 
-// Queues a batch of touches with the engine. The UI's mouse and the on-screen keyboard both touch,
-// from different threads, and every batch needs a new, increasing id. Returns the batch's id.
-uint64_t Worker::Touch(const std::vector<QemuIosPortableContact> &contacts) {
-    std::lock_guard<std::mutex> lock(touchMutex_);
+// Queues a batch of touches with the engine. Every batch needs a new, increasing id.
+void Worker::Touch(const std::vector<QemuIosPortableContact> &contacts) {
     if (touchId_) {   // how the previous batch ended (the engine applies them asynchronously)
         const int previous = engine_->inputStatus(touchId_);
         if (previous != QEMU_IOS_OK && previous != QEMU_IOS_QUEUED)
@@ -471,7 +525,6 @@ uint64_t Worker::Touch(const std::vector<QemuIosPortableContact> &contacts) {
     const int result = engine_->touch(++touchId_, NowNs(), contacts.data(), contacts.size());
     if (result != QEMU_IOS_QUEUED && result != QEMU_IOS_OK)
         Log("The engine refused a touch (phase %u): %d", contacts.empty() ? 0 : contacts[0].phase, result);
-    return touchId_;
 }
 
 // Developer requests: each runs in order on the background thread and answers with a reply.
@@ -524,6 +577,13 @@ void Worker::HandleDeveloperCommand(const Json &command) {
                 if (reply.status == -1 && reply.body.empty())
                     throw std::runtime_error("The guest tools aren't answering yet");
                 result = {{"status", reply.status}, {"output", reply.body}};
+            } else if (cmd == "ui.dump") {
+                // it_typein lists the views of the front app's key window (SpringBoard's when it's
+                // locked): each view's description, and its text if it has any (not a password's).
+                AgentReply reply = Agent("uidump", "", "", 15s);
+                if (reply.status != 0)
+                    throw std::runtime_error(InputError(reply.status, reply.body));
+                result = {{"views", reply.body}};
             } else if (cmd == "syslog") {
                 if (command.value("on", false))
                     services_.StartSyslog([this](const std::string &line) { Send({{"event", "log"}, {"line", line}}); });

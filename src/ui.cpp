@@ -851,8 +851,8 @@ void App::HardwareKeys(Session &session) {
 }
 
 // With "Send keyboard input to iOS" on, what you type goes to iOS while no text box here has focus:
-// the characters as typed (Shift and AltGr included), Backspace and Enter. The worker taps them
-// on iOS's on-screen keyboard (keyboard.h), which has no keys for the others.
+// the characters as typed (Shift and AltGr included), Backspace and Enter. The worker types them
+// into the text field that has focus in iOS (worker.h, "type").
 void App::SendKeys(Session &session) {
     const ImGuiIO &io = ImGui::GetIO();
     if (!settings_.sendKeys || io.WantTextInput)
@@ -928,8 +928,8 @@ void App::Controls(Session &session) {
         session.Stop();
     Tooltip("Shuts iOS down cleanly, like sliding to power off.");
 
-    // Typing: the worker taps the text on iOS's on-screen keyboard (keyboard.h), into the text
-    // field that has focus. A (!) after the box tells what couldn't be typed.
+    // Typing: the worker types the text into the text field that has focus in iOS (worker.h,
+    // "type"). A (!) after the box tells what couldn't be typed.
     ImGui::BeginDisabled(!ready);
     const char *problemMark = "(!)";
     float reserve = ImGui::CalcTextSize("Type").x + ImGui::GetStyle().FramePadding.x * 2 + 8;
@@ -938,8 +938,7 @@ void App::Controls(Session &session) {
     ImGui::SetNextItemWidth(-reserve);
     bool enter = ImGui::InputTextWithHint("##type", "Type into iOS (Enter sends)", &typeText_,
                                           ImGuiInputTextFlags_EnterReturnsTrue);
-    Tooltip("Typed by tapping the keys of iOS's on-screen keyboard, so tap a text field in iOS first. "
-            "Characters it has no key for are skipped, and iOS may auto-correct words.");
+    Tooltip("Typed into the text field that has focus in iOS, so tap one first.");
     ImGui::SameLine();
     if ((ImGui::Button("Type") || enter) && !typeText_.empty()) {
         session.typingProblem.clear();
@@ -988,8 +987,8 @@ void App::SettingsPage() {
     changed |= ImGui::Checkbox("Smooth scaling", &settings_.smooth);
     changed |= ImGui::Checkbox("Arrow keys tilt the device", &settings_.tilt);
     changed |= ImGui::Checkbox("Send keyboard input to iOS", &settings_.sendKeys);
-    Tooltip("What you type while a device is on screen is tapped on iOS's on-screen keyboard (letters, digits, "
-            "punctuation, Backspace and Enter). The shortcuts then take Ctrl (Ctrl+H for Home, and so on).");
+    Tooltip("What you type while a device is on screen goes into the text field that has focus in iOS "
+            "(characters, Backspace and Enter). The shortcuts then take Ctrl (Ctrl+H for Home, and so on).");
     if (changed)
         settings_.Save();
 

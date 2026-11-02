@@ -11,8 +11,9 @@
 //   {"cmd":"touch","contacts":[{"id":1,"phase":0,"x":0.5,"y":0.5}]}   phase: 0 down, 1 move, 2 up, 3 cancel
 //   {"cmd":"button","button":0,"down":true}                           0 Home, 1 Sleep/Wake, 2 Vol+, 3 Vol-
 //   {"cmd":"motion","x":0,"y":0,"z":9.8}                              accelerometer, m/s^2, portrait axes
-//   {"cmd":"type","text":"hello\n"}      types by tapping iOS's on-screen keyboard (keyboard.h), into the
-//                                        text field that has focus; "\n" taps Return, "\b" Delete
+//   {"cmd":"type","text":"hello\n"}      types into the text field that has focus, through it_typein
+//                                        (the guest tools' typing library); "\b" deletes a character,
+//                                        "\n" is a line break (Return in a one-line field)
 //   {"cmd":"pause","paused":true}   {"cmd":"mute","muted":true}   {"cmd":"internet","on":true}
 //   {"cmd":"webproxy","on":true}                                      HTTPS through the web proxy's bridge
 //   {"cmd":"stop"}                                                    shuts iOS down cleanly, then exits
@@ -23,6 +24,8 @@
 //     {"cmd":"files.delete","path":..}   {"cmd":"files.mkdir","path":..}   {"cmd":"files.rename","path":..,"to":..}
 //     {"cmd":"apps.list"}   {"cmd":"apps.install","ipa":"C:/app.ipa"}   {"cmd":"apps.launch","bundle":..}
 //     {"cmd":"shell","command":"ls /","sh":true}             runs as root; result {status, output}
+//     {"cmd":"ui.dump"}                                      the front app's views, one per line, with their
+//                                                            text (it_typein); result {views}
 //     {"cmd":"syslog","on":true}                             streams "log" events
 //     {"cmd":"forward","on":true,"port":2222,"devicePort":22}
 //     {"cmd":"snapshot.save","name":"booted"}                saves the machine to <device>\snapshots\<name>\

@@ -17,7 +17,6 @@
 //                                          --save-snapshot saves the machine t seconds after start;
 //                                          --snapshot starts from a saved machine instead of booting,
 //                                          on a throwaway copy of its disk (worker.h), in seconds
-//   iOS-Emulator.exe --keyboard shot.png   prints what typing reads off a screenshot (keyboard.h)
 //   iOS-Emulator.exe --catalog [product]   lists the firmwares that can be prepared
 //   iOS-Emulator.exe --prepare <firmware id> [--name N] [--jailbreak] [--ipsw file]
 //                                          prepares a new device (e.g. --prepare n18ap-8C148 --jailbreak)
@@ -25,7 +24,6 @@
 //   iOS-Emulator.exe --worker ...          internal: runs one device (started by the app)
 #include "common.h"
 #include "firmware.h"
-#include "keyboard.h"
 #include "library.h"
 #include "session.h"
 #include "ui.h"
@@ -279,12 +277,6 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             return RunCommand(rest);
         if (mode == "--catalog")
             return CatalogCommand(rest);
-        if (mode == "--keyboard" && rest.size() == 1) {   // what typing reads off a screenshot
-            int width = 0, height = 0;
-            const std::vector<uint8_t> pixels = ReadImage(fs::path(Widen(rest[0])), width, height);
-            Print(OnScreenKeyboard::Describe(pixels.data(), width, height, width * 4));
-            return 0;
-        }
         if (mode == "--prepare")
             return PrepareCommand(rest);
         if (mode == "--import" && rest.size() == 1) {

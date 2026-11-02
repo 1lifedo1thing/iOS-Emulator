@@ -54,13 +54,12 @@ The program finds the `resources` folder next to it or in a parent folder, so it
 Moving the mouse brings up controls for volume, Home, Sleep/Wake and leaving fullscreen; they fade
 out a few seconds after the mouse stops.
 
-**Typing**: tap a text field in iOS so its keyboard shows, then type in the box under the device. The
-app types by tapping the keys of iOS's on-screen keyboard, as a finger would, on every device and iOS
-version: it finds the keyboard on the screen (in any orientation), switches pages and Shift as needed,
-and skips characters the keyboard has no key for. iOS may auto-correct words, as it would yours. With
-**Send keyboard input to iOS** on (in Settings), what you type while a device is on screen (letters,
-digits, punctuation, Backspace and Enter) goes to iOS the same way, and the shortcuts above take Ctrl
-(Ctrl+H for Home, Ctrl with the arrow keys to tilt, and so on).
+**Typing**: tap a text field in iOS, then type in the box under the device. The text goes straight
+into the field through `it_typein`, a small library the guest tools load into every app (iOS 3 to 7),
+so any character works and Enter acts as Return. With **Send keyboard input to iOS** on (in Settings),
+what you type while a device is on screen (characters, Backspace and Enter) goes to iOS the same way,
+and the shortcuts above take Ctrl (Ctrl+H for Home, Ctrl with the arrow keys to tilt, and so on).
+Devices prepared before typing used `it_typein` don't have it: prepare them again to type.
 
 ### Internet and the web proxy
 
@@ -103,7 +102,6 @@ iOS-Emulator --run <device> [--seconds N] [--screenshot shot.png] [--internet] [
              [--tap x,y,t] [--swipe x,y,toX,toY,t[,seconds]]
              [--request t '<json>'] [--send t '<json>'] [--shot t shot.png]
              [--save-snapshot t NAME] [--snapshot NAME]
-iOS-Emulator --keyboard shot.png                       what typing reads off a screenshot
 ```
 
 `--run` boots a device, performs the taps, swipes and commands at the given times (screen
@@ -113,7 +111,7 @@ Internet is off unless `--internet` is given, and the web proxy is on unless `--
 
 Commands are the worker commands listed in `src/worker.h`. `--request` sends a developer request and
 prints its reply; `--send` sends any command without waiting, for example
-`{"cmd":"type","text":"hi"}`:
+`{"cmd":"type","text":"hi"}`. `{"cmd":"ui.dump"}` lists the views of the app in front, with their text:
 
 ```
 iOS-Emulator --run "My iPod" --seconds 120 --request 90 "{\"cmd\":\"shell\",\"command\":\"ls /var/mobile\"}"
@@ -145,7 +143,8 @@ iOS-Emulator.exe (the window)                 iOS-Emulator.exe --worker (one per
 - The engine is a build of QEMU with a C API (`third_party/qemu-ios`). It can start only once per
   process, so each running device gets a worker process; stopping one never affects the app.
 - `firmwarekit.exe` turns Apple's IPSW into a device: it decrypts it, builds the NAND image, installs the
-  guest tools (an agent, AppSync, the OpenGL ES front end) and, with `--jailbreak`, Cydia and AFC2.
+  guest tools (an agent, `it_typein` for typing, AppSync, the OpenGL ES front end) and, with
+  `--jailbreak`, Cydia and AFC2.
 - `lighttouch-usbmuxd.exe` plays the USB cable: the guest's USB port connects to it, and so does
   libimobiledevice for the developer services.
 - Prepared devices carry a proxy auto-config file that sends web traffic to `10.0.2.100:3128`. The
@@ -160,8 +159,7 @@ iOS-Emulator.exe (the window)                 iOS-Emulator.exe --worker (one per
 | `src/main.cpp` | Entry point and the command-line modes |
 | `src/ui.cpp` | The window: device list, screen and controls, fullscreen, Add Device page, developer panel, settings |
 | `src/session.cpp` | A running device as the window sees it: starts the helpers, reads frames and events |
-| `src/worker.cpp` | The worker process: runs the engine, sound, commands |
-| `src/keyboard.cpp` | Typing: finds iOS's on-screen keyboard on the screen and taps its keys |
+| `src/worker.cpp` | The worker process: runs the engine, sound, commands, typing (through `it_typein`) |
 | `src/engine.cpp` | The engine's C API and each board's boot command line |
 | `src/services.cpp` | Developer services over USB (libimobiledevice) |
 | `src/proxy.cpp` | The guest's web proxy (OpenSSL) |
