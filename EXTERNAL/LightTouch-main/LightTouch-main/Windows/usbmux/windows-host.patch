@@ -1,0 +1,344 @@
+--- a/src/client.c
++++ b/src/client.c
+@@ -30,17 +30,31 @@
+ #include <errno.h>
+ #include <unistd.h>
+ #include <sys/types.h>
++#ifndef _WIN32
+ #include <sys/socket.h>
++#endif
++#ifndef _WIN32
+ #include <netinet/in.h>
++#endif
++#ifndef _WIN32
+ #include <netinet/tcp.h>
++#endif
++#ifndef _WIN32
+ #include <sys/un.h>
++#endif
++#ifndef _WIN32
+ #include <arpa/inet.h>
++#endif
+ #include <fcntl.h>
+ 
+ #include <plist/plist.h>
+ #include <libimobiledevice-glue/collection.h>
+ #include <libimobiledevice-glue/thread.h>
+ 
++#ifdef _WIN32
++#define close closesocket
++#include "windows-peer.h"
++#endif
+ #include "log.h"
+ #include "usb.h"
+ #include "client.h"
+@@ -182,14 +196,23 @@
+  */
+ int client_accept(int listenfd)
+ {
+-	struct sockaddr_un addr;
++	struct sockaddr_storage addr;
+ 	int cfd;
+-	socklen_t len = sizeof(struct sockaddr_un);
++	socklen_t len = sizeof(struct sockaddr_storage);
++#ifdef _WIN32
++	cfd = ltw_accept(listenfd, (struct sockaddr *)&addr, &len);
++#else
+ 	cfd = accept(listenfd, (struct sockaddr *)&addr, &len);
++#endif
+ 	if (cfd < 0) {
+ 		usbmuxd_log(LL_ERROR, "accept() failed (%s)", strerror(errno));
+ 		return cfd;
+ 	}
++
++#ifdef _WIN32
++	/* No protocol payload may cross an unadmitted connection. */
++	if (!ltw_peer_admit((SOCKET)cfd, 0, 0)) { close(cfd); return -1; }
++#endif
+ 
+ 	int flags = fcntl(cfd, F_GETFL, 0);
+ 	if (flags < 0) {
+--- a/src/device.c
++++ b/src/device.c
+@@ -26,11 +26,18 @@
+ #endif
+ 
+ #include <sys/time.h>
++#ifndef _WIN32
+ #include <netinet/in.h>
++#endif
++#ifndef _WIN32
+ #include <netinet/tcp.h>
++#endif
+ #include <stdlib.h>
+ #include <string.h>
+ #include <stdint.h>
++#ifdef _WIN32
++#include "windows-peer.h"
++#endif
+ #include <inttypes.h>
+ #include <unistd.h>
+ 
+@@ -320,6 +327,9 @@
+ 				usbmuxd_log(LL_DEBUG, "%s: flushing buffer to client (%u bytes)", __func__, conn->ib_size);
+ 				uint64_t tm_last = mstime64();
+ 				while(1){
++#ifdef _WIN32
++					if (ltw_windows_stopping()) break;
++#endif
+ 					size = client_write(conn->client, conn->ib_buf, conn->ib_size);
+ 					if(size < 0) {
+ 						usbmuxd_log(LL_ERROR, "%s: aborting buffer flush to client after error.", __func__);
+--- a/src/usb-qemu.c
++++ b/src/usb-qemu.c
+@@ -28,18 +28,32 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <stdint.h>
++#include <stdbool.h>
++#include <time.h>
+ #include <string.h>
+ #include <errno.h>
+ #include <unistd.h>
+ #include <fcntl.h>
++#ifndef _WIN32
+ #include <poll.h>
++#endif
+ #include <sys/time.h>
+ #include <sys/types.h>
++#ifndef _WIN32
+ #include <sys/socket.h>
++#endif
++#ifndef _WIN32
+ #include <netinet/in.h>
++#endif
++#ifndef _WIN32
+ #include <netinet/tcp.h>
++#endif
++#ifndef _WIN32
+ #include <arpa/inet.h>
++#endif
++#ifndef _WIN32
+ #include <sys/un.h>
++#endif
+ #include <sys/stat.h>
+ 
+ #include "usb.h"
+@@ -48,7 +62,13 @@
+  * so a SIGTERM arriving while we are inside enumerate() is not delivered until
+  * we return -- which used to mean the app's teardown waited out every control
+  * timeout while the listening socket stayed bound. */
++#ifdef _WIN32
++#include "windows-peer.h"
++#define should_exit ltw_windows_stopping()
++#define close closesocket
++#else
+ extern int should_exit;
++#endif
+ #include "log.h"
+ /* Per-transfer lines (IN#/OUT#) are LL_DEBUG: one per USB transfer, thousands a second while the guest
+  * talks. The app's usbmuxd runs -f -v (LL_INFO) and leaves them out; -v -v shows them. */
+@@ -181,9 +201,13 @@
+ 
+ static uint64_t now_ms(void)
+ {
++#ifdef _WIN32
++	return GetTickCount64();
++#else
+ 	struct timeval tv;
+ 	gettimeofday(&tv, NULL);
+ 	return (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
++#endif
+ }
+ 
+ static void sleep_ms(int ms)
+@@ -235,7 +259,10 @@
+ 	const char *p = buf;
+ 	uint64_t started = mstime64();
+ 	while (len) {
+-		ssize_t r = write(fd, p, len);
++#ifdef _WIN32
++		if (should_exit) return -1;
++#endif
++		ssize_t r = send(fd, p, len, 0);
+ 		if (r > 0) {
+ 			p += r;
+ 			len -= r;
+@@ -247,6 +274,10 @@
+ 		if (r < 0 && errno == EAGAIN) {
+ 			if (stalled(started, "write"))
+ 				return -1;
++#ifdef _WIN32
++			struct pollfd wait = { .fd = fd, .events = POLLOUT };
++			if (poll(&wait, 1, 100) < 0) return -1;
++#endif
+ 			continue;
+ 		}
+ 		return -1;
+@@ -259,7 +290,10 @@
+ 	char *p = buf;
+ 	uint64_t started = mstime64();
+ 	while (len) {
+-		ssize_t r = read(fd, p, len);
++#ifdef _WIN32
++		if (should_exit) return -1;
++#endif
++		ssize_t r = recv(fd, p, len, 0);
+ 		if (r > 0) {
+ 			p += r;
+ 			len -= r;
+@@ -271,6 +305,10 @@
+ 		if (r < 0 && errno == EAGAIN) {
+ 			if (stalled(started, "read"))
+ 				return -1;
++#ifdef _WIN32
++			struct pollfd wait = { .fd = fd, .events = POLLIN };
++			if (poll(&wait, 1, 100) < 0) return -1;
++#endif
+ 			continue;
+ 		}
+ 		return -1;
+@@ -834,6 +872,7 @@
+ 	if (idlespec)
+ 		idle_poll_ms = atoi(idlespec);
+ 
++#ifndef _WIN32
+ 	if (spec && spec[0] == '/') {
+ 		struct sockaddr_un su;
+ 		if (strlen(spec) >= sizeof(su.sun_path)) {
+@@ -865,6 +904,7 @@
+ 		return 0;
+ 	}
+ 
++#endif
+ 	if (spec && *spec) {
+ 		const char *colon = strrchr(spec, ':');
+ 		if (colon) {
+@@ -877,17 +917,33 @@
+ 		} else {
+ 			port = atoi(spec);
+ 		}
+-		if (port <= 0 || port > 65535)
++		if (port < 0 || port > 65535)
+ 			port = DEFAULT_PORT;
+ 	}
+ 
++#ifdef _WIN32
++	listen_fd = ltw_socket(AF_INET, SOCK_STREAM, 0);
++#else
+ 	listen_fd = socket(AF_INET, SOCK_STREAM, 0);
++#endif
+ 	if (listen_fd < 0) {
+ 		usbmuxd_log(LL_FATAL, "Could not create the QEMU listening socket: %s", strerror(errno));
+ 		return -1;
+ 	}
++	#ifdef _WIN32
++	if (setsockopt(listen_fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char*)&one, sizeof(one))) {
++		close(listen_fd); listen_fd = -1; return -1;
++	}
++#else
+ 	setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
++#endif
++#ifdef _WIN32
++	if (fcntl(listen_fd, F_SETFL, O_NONBLOCK)) {
++		close(listen_fd); listen_fd = -1; return -1;
++	}
++#else
+ 	fcntl(listen_fd, F_SETFL, fcntl(listen_fd, F_GETFL, 0) | O_NONBLOCK);
++#endif
+ 
+ 	memset(&sa, 0, sizeof(sa));
+ 	sa.sin_family = AF_INET;
+@@ -1079,7 +1135,11 @@
+ 	if (listen_fd < 0)
+ 		return;
+ 
++#ifdef _WIN32
++	fd = ltw_accept(listen_fd, (struct sockaddr *)&sa, &sl);
++#else
+ 	fd = accept(listen_fd, (struct sockaddr *)&sa, &sl);
++#endif
+ 	if (fd < 0)
+ 		return;
+ 
+@@ -1095,10 +1155,18 @@
+ 	 * short enough that a guest pegging its CPU (installd unpacking an app on
+ 	 * 128 MB) stalled QEMU's IO past it, and the "device" died mid-install
+ 	 * while both ends were actually fine. */
++#ifdef _WIN32
++	/* Nonblocking transfers retain the 30s progress deadline but poll the
++	 * private control pipe at least every 100ms, including enumeration. */
++	if (!ltw_peer_admit((SOCKET)fd, 0, 0) || fcntl(fd, F_SETFL, O_NONBLOCK)) {
++		close(fd); return;
++	}
++#else
+ 	tv.tv_sec = 30;
+ 	tv.tv_usec = 0;
+ 	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+ 	setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
++#endif
+ 
+ 	delayspec = getenv("USBMUXD_QEMU_DELAY");
+ 	delay = delayspec ? atoi(delayspec) : 0;
+@@ -1198,9 +1266,19 @@
+ {
+ 	uint64_t deadline = now_ms() + msec;
+ 	while (now_ms() < deadline) {
++#ifdef _WIN32
++		if (should_exit) return -1;
++#endif
+ 		if (usb_process() < 0)
+ 			return -1;
+ 		sleep_ms(poll_ms);
+ 	}
+ 	return 0;
+ }
++
++#ifdef _WIN32
++int usb_windows_listen_port(void) {
++    struct sockaddr_in address; int size=sizeof(address);
++    return getsockname(listen_fd,(struct sockaddr*)&address,&size) ? -1 : ntohs(address.sin_port);
++}
++#endif
+--- a/src/utils.c
++++ b/src/utils.c
+@@ -76,7 +76,7 @@
+ 	list->count = 0;
+ }
+ 
+-#ifndef HAVE_CLOCK_GETTIME
++#if !defined(HAVE_CLOCK_GETTIME) && !defined(_WIN32)
+ typedef int clockid_t;
+ #define CLOCK_MONOTONIC 1
+ 
+@@ -108,6 +108,10 @@
+ 
+ void get_tick_count(struct timeval * tv)
+ {
++#ifdef _WIN32
++    ULONGLONG ms=GetTickCount64();
++    tv->tv_sec=ms/1000; tv->tv_usec=(ms%1000)*1000;
++#else
+ 	struct timespec ts;
+ 	if(0 == clock_gettime(CLOCK_MONOTONIC, &ts)) {
+ 		tv->tv_sec = ts.tv_sec;
+@@ -115,6 +119,7 @@
+ 	} else {
+ 		gettimeofday(tv, NULL);
+ 	}
++#endif
+ }
+ 
+ /**
+--- a/src/utils.h
++++ b/src/utils.h
+@@ -22,7 +22,9 @@
+ #ifndef UTILS_H
+ #define UTILS_H
+ 
++#ifndef _WIN32
+ #include <poll.h>
++#endif
+ #include <plist/plist.h>
+ 
+ enum fdowner {

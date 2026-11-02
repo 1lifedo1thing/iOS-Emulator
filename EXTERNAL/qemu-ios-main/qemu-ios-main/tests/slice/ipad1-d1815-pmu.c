@@ -1,0 +1,208 @@
+/* Dialog D1815 PMU (the iPad's PMU, hw/arm/s5l8930_i2c.c): the restart/power-off
+ * split, the ADC start-bit and mux-6 cable classification.
+ *
+ * Recent iPad fixes this pins:
+ *   - 0x7b = 0x0b is AppleD1815PMU's restart: always a reset request. With the
+ *     OS's boot reason (0x8F) set to iBoot's stay-off pattern (& 0xd0 == 0x90 or
+ *     0x10) the halt is confirmed at that restart (iBoot then waits, screen off;
+ *     tests/slice/ipad1-pmu-scratch.c pins the bank surviving it). (smoke #28/#39)
+ *   - An ADC conversion clears its start bit (0x30 bit4) when done; iBoot polls it.
+ *   - mux 6 is the dock D+/D- the charger biased: with a host's pull-downs it
+ *     reads 0 mV (USBHost), otherwise mid-scale 0x800 (a brick, "Detached").
+ *     mV = adc * 5000 / 4096. (4.3.x cable detection, smoke #35)
+ *   - The temperature muxes read a room-temperature device through the driver's
+ *     own conversions: the 10k NTCs (tbat, adc_in7, tdev1-4) 20-30 C, tjunc
+ *     20-40 C, and the calibration resistor (tcal) within 0.5 C of the 51.82 C
+ *     iOS 7's ThermalMonitor expects of it on N90. With everything at mid-scale
+ *     (2 C) ThermalMonitor added the difference to every sensor and iOS 7.0
+ *     showed its "needs to cool down" screen (LightTouchMac issue 83).
+ *   - "pmu go hib" (0x12 bit 1) drops the AP rail ("ap-power") when the board
+ *     wires it; Home powers it back on, and the AP's power-on reset leaves the
+ *     PMU's registers (0x8F's suspend marker, the button event) as they were.
+ *
+ * Mutation (named, must fail this test): in d1815_send's PMU_SYS_CTRL case, replace
+ *     if (d1815_halt_reason(s)) {
+ * with
+ *     if (0) {
+ * so a stay-off restart is never confirmed as the halt.
+ *
+ *   - The RTC counter (0x4C) reads QEMU's RTC (qemu_get_timedate, so -rtc base= moves it), and rtc-epoch
+ *     pins it at power-on and runs on from there.
+ *
+ * SLICE hw/arm/s5l8930_i2c.c define PMU_[A-Za-z0-9_]+|D1815_ADDR
+ * SLICE hw/arm/s5l8930_i2c.c range struct S5L8930D1815State { | \n/*\n * The guest's own power-off
+ * SLICE hw/arm/s5l8930_i2c.c fn d1815_halt_reason d1815_set_ap_power d1815_update_irq d1815_adc_done s5l8930_d1815_button s5l8930_d1815_take_suspend s5l8930_d1815_set_usb_host s5l8930_d1815_set_vbat s5l8930_d1815_usb_cable_event d1815_rtc_clock d1815_rtc_count d1815_recv d1815_send d1815_reset s5l8930_d1815_guest_shutdown_confirmed d1815_post_load
+ */
+#include <assert.h>
+#define trace_event_get_state_backends(id) 0
+#define TRACE_PRINTF(fn, ...) do { if (0) printf(__VA_ARGS__); } while (0)
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+typedef struct { int unused; } I2CSlave;
+typedef struct { bool pending; int64_t deadline; } QEMUTimer;
+typedef int *qemu_irq;
+typedef struct S5L8930D1815State S5L8930D1815State;
+typedef S5L8930D1815State DeviceState;
+#define S5L8930_D1815(s) ((S5L8930D1815State *)(s))
+#define QEMU_CLOCK_VIRTUAL 0
+#define SCALE_MS 1000000LL
+#define MAX(a,b) ((a)>(b)?(a):(b))
+#define MIN(a,b) ((a)<(b)?(a):(b))
+#define SHUTDOWN_CAUSE_GUEST_SHUTDOWN 1
+#define SHUTDOWN_CAUSE_GUEST_RESET 2
+#define qatomic_read(p) (*(p))
+#define qatomic_set(p,v) (*(p)=(v))
+static int64_t now;
+static time_t host_now = 1700000000;  /* the host clock */
+static time_t rtc_base_shift;         /* -rtc base=: QEMU's RTC this far from the host */
+static void qemu_get_timedate(struct tm *tm, int offset) { time_t t = host_now + rtc_base_shift + offset; gmtime_r(&t, tm); }
+#define mktimegm timegm
+static int shutdowns, resets;
+static int d1815_shutdown_confirmed;
+static int64_t qemu_clock_get_ns(int c) { return now; }
+static void qemu_set_irq(int *irq, int v) { if (irq) *irq = !!v; }
+static void timer_mod(QEMUTimer *t, int64_t at) { t->pending = true; t->deadline = at; }
+static void timer_del(QEMUTimer *t) { t->pending = false; }
+static void qemu_system_shutdown_request(int cause) { shutdowns++; }
+static void qemu_system_reset_request(int cause) { resets++; }
+static uint32_t ldl_le_p(const void *p) {
+    const uint8_t *b = p;
+    return b[0] | b[1] << 8 | b[2] << 16 | (uint32_t)b[3] << 24;
+}
+#include "slice.h"
+
+static void wr(S5L8930D1815State *s, uint8_t reg, uint8_t val) {
+    s->addressing = true;
+    d1815_send((I2CSlave *)s, reg);
+    d1815_send((I2CSlave *)s, val);
+}
+static unsigned rd(S5L8930D1815State *s, uint8_t reg) {
+    s->reg = reg;
+    return d1815_recv((I2CSlave *)s);
+}
+static uint32_t rd32(S5L8930D1815State *s, uint8_t reg) {
+    uint32_t v = 0;
+    for (int i = 0; i < 4; i++) v |= (uint32_t)rd(s, reg + i) << (8 * i);
+    return v;
+}
+static void advance(S5L8930D1815State *s) {
+    assert(s->adc_timer->pending);
+    now = s->adc_timer->deadline;
+    s->adc_timer->pending = false;
+    d1815_adc_done(s);
+}
+int main(void) {
+    int irq = 0;
+    QEMUTimer timer = {0};
+    S5L8930D1815State s = { .irq = &irq, .adc_timer = &timer };
+    d1815_reset((DeviceState *)&s);
+
+    /* Reset leaves everything masked, the battery SWI line high, no events. */
+    assert(s.regs[PMU_STATUS_C] == PMU_GPIO6_BATT_SWI && !irq);
+
+    /* --- ADC: start bit clears on completion, mux 4 = battery voltage --- */
+    wr(&s, PMU_ADC_CTRL, PMU_ADC_MUX_VBAT | PMU_ADC_START);  /* 0x14 */
+    assert(timer.pending);
+    assert(s.regs[PMU_ADC_CTRL] & PMU_ADC_START);            /* still converting */
+    advance(&s);
+    assert(!(s.regs[PMU_ADC_CTRL] & PMU_ADC_START));         /* start bit cleared */
+    /* default vbat 3900 mV -> adc = (3900-2500)*4096/2000 = 2867 = 0xB33 */
+    unsigned adc = (s.regs[PMU_ADC_RES] & 0xf) | (s.regs[PMU_ADC_RES + 1] << 4);
+    assert(adc == 2867);
+    assert(s.regs[PMU_EVENT + 1] & PMU_EVENT_B_ADC);         /* completion is an event */
+
+    /* --- mux 6 cable: host pull-downs read 0 mV (USBHost); else mid-scale --- */
+    s5l8930_d1815_set_usb_host((DeviceState *)&s, true);
+    wr(&s, PMU_ADC_CTRL, PMU_ADC_MUX_BRICK | PMU_ADC_START); /* 0x16 */
+    advance(&s);
+    unsigned brick = (s.regs[PMU_ADC_RES] & 0xf) | (s.regs[PMU_ADC_RES + 1] << 4);
+    assert(brick == 0);                                      /* host: 0 mV both lines */
+
+    s5l8930_d1815_set_usb_host((DeviceState *)&s, false);
+    wr(&s, PMU_ADC_CTRL, PMU_ADC_MUX_BRICK | PMU_ADC_START);
+    advance(&s);
+    brick = (s.regs[PMU_ADC_RES] & 0xf) | (s.regs[PMU_ADC_RES + 1] << 4);
+    assert(brick == 0x800);                                  /* no host: mid-scale (brick / Detached) */
+
+    /* --- temperatures, converted as AppleD1815PMU does (7.0b1 809d5e34): a room-temperature device --- */
+    static const unsigned ntc_muxes[] = { 2, 7, 11, 12, 13, 14, 10 };   /* tbat adc_in7 tdev1-4, tcal */
+    /* the driver's 10k NTC table: ohms at -40, -35, ... 60 C */
+    static const long ntc_r[] = { 188500, 144290, 111330, 86560, 67790, 53460, 42450, 33930, 27280,
+                                  22070, 17960, 14700, 12090, 10000, 8310, 6940, 5830, 4910, 4160,
+                                  3540, 3020 };
+    for (unsigned i = 0; i < sizeof(ntc_muxes) / sizeof(ntc_muxes[0]); i++) {
+        wr(&s, PMU_ADC_CTRL, ntc_muxes[i] | PMU_ADC_START);
+        advance(&s);
+        long raw = (s.regs[PMU_ADC_RES] & 0xf) | (s.regs[PMU_ADC_RES + 1] << 4);
+        long ohms = raw * 40 * 20000 >> 16;                      /* V (16.16) = raw * 40; R = V * 20000 */
+        int k = 1;
+        while (k < 20 && ntc_r[k] > ohms) k++;
+        double c = -40 + 5 * (k - 1) + 5.0 * (ntc_r[k - 1] - ohms) / (ntc_r[k - 1] - ntc_r[k]);
+        if (ntc_muxes[i] == 10) {
+            assert(c > 51.32 && c < 52.32);                      /* ThermalMonitor's N90 default, 51.82 */
+        } else {
+            assert(c > 20 && c < 30);
+        }
+    }
+    wr(&s, PMU_ADC_CTRL, PMU_ADC_MUX_TJUNC | PMU_ADC_START);
+    advance(&s);
+    int tj = (s.regs[PMU_ADC_RES] & 0xf) | (s.regs[PMU_ADC_RES + 1] << 4);
+    int cal = (s.regs[0x43] << 4 | (s.regs[0x44] & 0xf)) & 0xfff;
+    if (!(cal & 0xff0)) cal = 0x425;                             /* unprogrammed: the driver's default */
+    double tjunc = 26 + 0.32 * (cal - tj);
+    assert(tjunc > 20 && tjunc < 40);
+
+    /* --- restart with no stay-off flag is a reboot --- */
+    assert(!resets && !shutdowns);
+    s.regs[PMU_BOOT_REASON] = 0x00;
+    wr(&s, PMU_SYS_CTRL, PMU_SYS_RESTART);                   /* 0x7b <- 0x0b */
+    assert(resets == 1 && shutdowns == 0 && !s5l8930_d1815_guest_shutdown_confirmed());
+
+    /* --- restart with iBoot's stay-off reason: still a restart, and the halt is confirmed --- */
+    s.regs[PMU_BOOT_REASON] = 0x90;                          /* & 0xd0 == 0x90 */
+    wr(&s, PMU_SYS_CTRL, PMU_SYS_RESTART);
+    assert(resets == 2 && shutdowns == 0);                   /* iBoot runs its power-off wait */
+    assert(s5l8930_d1815_guest_shutdown_confirmed());
+
+    /* A non-restart write to 0x7b just stores, no reboot/shutdown. */
+    wr(&s, PMU_SYS_CTRL, 0x0f);
+    assert(resets == 2 && shutdowns == 0);
+
+    /* --- hibernate: 0x12 bit 1 drops the rail, Home brings it back, the PMU keeps its state --- */
+    int ap = 1;
+    S5L8930D1815State h = { .irq = &irq, .adc_timer = &timer, .ap_power = &ap };
+    d1815_reset((DeviceState *)&h);
+    wr(&h, PMU_BOOT_REASON, 0x80);                           /* the kernel's suspend marker */
+    wr(&h, PMU_OOC, 0x02);
+    assert(!ap && h.ap_off && !shutdowns && !(h.regs[PMU_OOC] & 2));
+    s5l8930_d1815_button((DeviceState *)&h, false, true);    /* Home */
+    assert(ap && !h.ap_off && h.ap_waking);
+    d1815_reset((DeviceState *)&h);                          /* the AP's power-on reset */
+    assert(h.regs[PMU_BOOT_REASON] == 0x80 && (h.regs[PMU_EVENT] & PMU_EVENT_A_MENU));
+    assert(s5l8930_d1815_take_suspend((DeviceState *)&h) && h.regs[PMU_BOOT_REASON] == 0x40);
+    d1815_reset((DeviceState *)&h);                          /* a cold reset clears the events */
+    assert(!(h.regs[PMU_EVENT] & PMU_EVENT_A_MENU));
+    /* Unwired (iBoot/ROM boots): the command is stored and nothing switches. */
+    S5L8930D1815State u = { .irq = &irq, .adc_timer = &timer };
+    d1815_reset((DeviceState *)&u);
+    wr(&u, PMU_OOC, 0x02);
+    assert(!u.ap_off && (u.regs[PMU_OOC] & 2));
+
+    /* --- the RTC counter: QEMU's RTC, then rtc-epoch on top --- */
+    S5L8930D1815State r = { .irq = &irq, .adc_timer = &timer };
+    d1815_reset((DeviceState *)&r);
+    assert(rd32(&r, PMU_RTC_COUNT) == 1700000000);           /* no -rtc: the host's UTC */
+    rtc_base_shift = 1265068800 - host_now;                  /* -rtc base=2010-02-02 */
+    assert(rd32(&r, PMU_RTC_COUNT) == 1265068800);
+    r.rtc_epoch = 1300000000;                                /* a pinned date: power-on reads it */
+    d1815_reset((DeviceState *)&r);
+    host_now += 5;
+    assert(rd32(&r, PMU_RTC_COUNT) == 1300000005);
+
+    puts("PASS: D1815 restart confirms a stay-off halt, ADC start-bit clear, mux-6 cable classification, "
+         "room-temperature thermistors and die, hibernate rail, RTC from QEMU's RTC and rtc-epoch");
+}

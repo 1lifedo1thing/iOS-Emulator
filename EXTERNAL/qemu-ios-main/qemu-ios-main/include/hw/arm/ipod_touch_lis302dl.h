@@ -1,0 +1,85 @@
+#ifndef HW_LIS302DL_H
+#define HW_LIS302DL_H
+
+#include "qemu/osdep.h"
+#include "qemu/module.h"
+#include "qemu/timer.h"
+#include "hw/core/sysbus.h"
+#include "hw/i2c/i2c.h"
+#include "hw/core/irq.h"
+
+#define TYPE_LIS302DL                 "lis302dl"
+OBJECT_DECLARE_SIMPLE_TYPE(LIS302DLState, LIS302DL)
+
+#define ACCEL_WHOAMI	0x0F
+#define ACCEL_STATUS    0x27
+#define ACCEL_OUT_X     0x29
+#define ACCEL_OUT_Y     0x2B
+#define ACCEL_OUT_Z     0x2D
+#define ACCEL_CTRL_REG1 0x20
+#define ACCEL_CTRL_REG2 0x21
+#define ACCEL_CTRL_REG3 0x22
+
+#define ACCEL_WHOAMI_VALUE	0x3B
+
+/* CTRL_REG1 per-axis enable bits (public ST LIS302DL datasheet). */
+/* CTRL_REG2 bit 6: reboot the part's memory content. Self-clearing. */
+#define ACCEL_CTRL_REG2_BOOT 0x40
+/* LIS331DLH (ST datasheet): WHO_AM_I 0x32, CTRL_REG2 BOOT is bit 7. */
+#define ACCEL_WHOAMI_LIS331DLH 0x32
+#define ACCEL_CTRL_REG2_BOOT_LIS331 0x80
+
+#define ACCEL_CTRL_REG1_XEN 0x01
+#define ACCEL_CTRL_REG1_YEN 0x02
+#define ACCEL_CTRL_REG1_ZEN 0x04
+#define ACCEL_CTRL_REG1_FS 0x20   /* full scale: 0 = ±2 g (18 mg/digit), 1 = ±8 g (72 mg) */
+
+typedef struct LIS302DLState {
+	I2CSlave i2c;
+	uint32_t cmd;          /* current register pointer */
+	bool pointer_set;      /* have we consumed the sub-address byte this xfer? */
+	int8_t out_x;          /* signed acceleration counts (18mg/digit) */
+	int8_t out_y;
+	int8_t out_z;
+	int8_t base_x;         /* steady-state vector, restored after a shake */
+	int8_t base_y;
+	int8_t base_z;
+	int32_t pitch_mdeg, roll_mdeg;
+	bool flat_pose;
+	uint32_t orientation;  /* last orientation applied via QMP */
+	uint16_t ctrl_reg1;
+	uint16_t ctrl_reg2;
+	uint16_t ctrl_reg3;
+    uint32_t rate_hz;       /* zero: follow CTRL_REG1 DR (100/400 Hz) */
+    uint8_t whoami;         /* 0x3B LIS302DL (default), 0x32 LIS331DLH */
+    /* "dt-orientation": the board DT accelerometer node's "orientation" bytes in hex, as the guest's driver
+     * reads them; the part reads as that driver expects (ios_dt_mount). Empty: the device's own axes. */
+    char *dt_orientation;
+    bool flip_z;            /* the mount reads device z the other way from ios_dt_mount's rule (the iPod touch 4G) */
+    int8_t axis[3];         /* derived: each sensor axis as a signed device axis (1-based), 0 until derived */
+    /* set by a machine whose gyro sees the turn: an attitude change turns the device over time (lis302dl_motion_rate); transient, not migrated */
+    bool motion;
+    int64_t motion_start_ns, motion_ns;
+    double motion_from[3], motion_axis[3], motion_angle;
+    uint32_t noise_state;
+    uint32_t host_fields;
+    int64_t host_accel_until_ns, host_gyro_until_ns;
+    double host_acceleration[3], host_angular_velocity[3];
+    int64_t last_sample_ns, shake_start_ns;
+    int64_t trace_last_poll_ns, trace_last_report_ns;
+    uint32_t trace_polls;
+    int64_t trace_poll_sum_ns;
+} LIS302DLState;
+
+/* Host-drivable controls, forwarded from the machine's QMP properties. */
+void lis302dl_apply_orientation(LIS302DLState *s, uint32_t o);
+bool lis302dl_apply_attitude(LIS302DLState *s, double pitch, double roll, bool flat);
+void lis302dl_shake(LIS302DLState *s);
+/* The device's rotation rate (rad/s, device axes) at `now` while an attitude change turns it; false at rest. */
+bool lis302dl_motion_rate(LIS302DLState *s, int64_t now, double w[3]);
+void lis302dl_set_axis_value(LIS302DLState *s, char axis, int v);
+
+void lis302dl_set_host_motion(LIS302DLState *s, uint32_t fields, const double a[3], const double w[3]);
+void lis302dl_clear_host_motion(LIS302DLState *s);
+
+#endif

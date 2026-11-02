@@ -1,0 +1,16 @@
+appId: org.lighttouch.android
+---
+# Home screen with a device selected and stopped.
+- launchApp
+- assertVisible:
+    id: "device_selector"
+- assertVisible:
+    id: "open_store"
+- assertVisible:
+    id: "open_settings"
+- assertVisible:
+    id: "guest_screen"
+- assertVisible:
+    id: "start_guest"
+- assertVisible:
+    id: "device_home"

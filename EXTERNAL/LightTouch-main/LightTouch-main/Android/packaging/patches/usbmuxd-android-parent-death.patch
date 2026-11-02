@@ -1,0 +1,75 @@
+--- a/src/main.c
++++ b/src/main.c
+@@ -46,6 +46,9 @@
+ #include <getopt.h>
+ #include <pwd.h>
+ #include <grp.h>
++#ifdef __ANDROID__
++#include <sys/prctl.h>
++#endif
+ 
+ #include "log.h"
+ #include "usb.h"
+@@ -713,6 +716,42 @@
+ 	}
+ }
+ 
++#ifdef __ANDROID__
++/* The Android app's engine process is routinely ended with SIGKILL, which
++ * never lets it stop this child. With LT_PARENT_DEATH_SIGNAL=1 the kernel
++ * sends us SIGTERM (a clean main_loop exit) when the parent goes away. The
++ * parent may already be gone before prctl() takes effect: then getppid() is
++ * 1 (or a subreaper) and differs from LT_PARENT_PID, so exit immediately. */
++static void android_parent_death_guard(void)
++{
++	const char *enable = getenv("LT_PARENT_DEATH_SIGNAL");
++	if (!enable || strcmp(enable, "1") != 0)
++		return;
++	if (prctl(PR_SET_PDEATHSIG, SIGTERM) != 0) {
++		fprintf(stderr, "usbmuxd: FATAL: PR_SET_PDEATHSIG failed: %s\n", strerror(errno));
++		_exit(1);
++	}
++	pid_t parent = getppid();
++	const char *expected = getenv("LT_PARENT_PID");
++	if (parent == 1 || (expected && *expected && strtol(expected, NULL, 10) != (long)parent)) {
++		fprintf(stderr, "usbmuxd: parent %d already exited, not starting\n", (int)parent);
++		_exit(1);
++	}
++}
++
++/* A private -S listener (and its pidfile) belongs to this instance alone:
++ * remove both on a clean exit so the next session never finds stale paths.
++ * The QEMU listener is already removed by usb_shutdown(). */
++static void android_private_cleanup(void)
++{
++	if (!listen_addr || listen_addr[0] != '/' || strcmp(listen_addr, socket_path) == 0)
++		return;
++	unlink(listen_addr);
++	if (lockfile)
++		unlink(lockfile);
++}
++#endif
++
+ int main(int argc, char *argv[])
+ {
+ 	int listenfd;
+@@ -721,6 +760,9 @@
+ 	struct flock lock;
+ 	char pids[10];
+ 
++#ifdef __ANDROID__
++	android_parent_death_guard();
++#endif
+ 	parse_opts(argc, argv);
+ 
+ 	argc -= optind;
+@@ -970,6 +1012,9 @@
+ 	usb_shutdown();
+ 	device_shutdown();
+ 	client_shutdown();
++#ifdef __ANDROID__
++	android_private_cleanup();
++#endif
+ 	usbmuxd_log(LL_NOTICE, "Shutdown complete");
+ 
+ terminate:

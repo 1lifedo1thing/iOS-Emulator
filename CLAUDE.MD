@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is a C++ copy of [LightTouch](https://github.com/blake-lucas/LightTouch) by blake-lucas.
 
 - `resources/` contains all the qemu-ios prebuilt DLLs and LightTouch tools. They should be all you need.
-- `EXTERNAL/` contains the source of both qemu-ios (prebuilt into `resources/`) and LightTouch. Use it as a guiding reference. It is not part of the build and is git-ignored.
+- `EXTERNAL/` contains the source of both qemu-ios (prebuilt into `resources/`) and LightTouch. Use it as a guiding reference. It is not part of the build. Both sources are committed, since they're the GPLv2 source of the binaries in `resources/` (LightTouch carries this project's firmwarekit changes). `EXTERNAL/rust/` (the toolchains) is git-ignored.
 
 Do not overcomplicate the project. The code should be modularized, yet simple: not too many files or folders, clean names, clean functions, good, documented (or commented) code. It should be instantly readable by external users even without context.
 

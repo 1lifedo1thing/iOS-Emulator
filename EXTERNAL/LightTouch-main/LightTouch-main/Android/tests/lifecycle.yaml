@@ -1,0 +1,47 @@
+appId: org.lighttouch.android
+---
+# Requires legitimately imported private base/package. This tests native lifecycle
+# state; root acceptance must also inspect guest Home, data durability and new PIDs.
+- launchApp:
+    clearState: false
+- tapOn:
+    id: "start_guest"
+- extendedWaitUntil:
+    visible: "running"
+    timeout: 120000
+- tapOn: "Pause"
+- assertVisible: "paused"
+- tapOn: "Resume"
+- assertVisible: "running"
+- pressKey: HOME
+- launchApp:
+    stopApp: false
+    clearState: false
+# Resume automatically (on by default) picks the session back up on return.
+- extendedWaitUntil:
+    visible: "running"
+    timeout: 10000
+- tapOn:
+    id: "screenshot_button"
+- extendedWaitUntil:
+    visible: "Screenshot saved to Pictures/LightTouch"
+    timeout: 10000
+- tapOn:
+    id: "stop_guest"
+- tapOn:
+    id: "confirm_stop"
+- extendedWaitUntil:
+    visible: "stopped"
+    timeout: 20000
+- tapOn:
+    id: "start_guest"
+- extendedWaitUntil:
+    visible: "running"
+    timeout: 120000
+- tapOn:
+    id: "stop_guest"
+- tapOn:
+    id: "confirm_stop"
+- extendedWaitUntil:
+    visible: "stopped"
+    timeout: 20000

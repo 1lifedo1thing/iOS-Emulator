@@ -1,0 +1,35 @@
+--- a/src/main.c
++++ b/src/main.c
+@@ -854,12 +854,18 @@
+ 		res = -1;
+ 		goto terminate;
+ 	}
++	/* Explicit private QEMU sessions keep pairing data owner-only. Normal
++	 * system usbmuxd invocations retain the shared configuration mode. */
++	const char *qemu_endpoint = getenv("USBMUXD_QEMU_ADDR");
++	const int private_qemu = qemu_endpoint && qemu_endpoint[0] == '/' &&
++		listen_addr && listen_addr[0] == '/' && strcmp(listen_addr, socket_path) != 0;
++	const mode_t config_mode = private_qemu ? 0700 : 02775;
+ 	const char* userprefdir = config_get_config_dir();
+ 	usbmuxd_log(LL_NOTICE, "Configuration directory: %s", userprefdir);
+ 	struct stat fst;
+ 	memset(&fst, '\0', sizeof(struct stat));
+ 	if (stat(userprefdir, &fst) < 0) {
+-		if (mkdir(userprefdir, 0775) < 0) {
++		if (mkdir(userprefdir, private_qemu ? 0700 : 0775) < 0) {
+ 			usbmuxd_log(LL_FATAL, "Failed to create configuration directory '%s': %s", userprefdir, strerror(errno));
+ 			res = -1;
+ 			goto terminate;
+@@ -872,9 +878,9 @@
+ 	}
+ 
+ 	// make sure permission bits are set correctly
+-	if (fst.st_mode != 02775) {
+-		if (chmod(userprefdir, 02775) < 0) {
+-			usbmuxd_log(LL_WARNING, "chmod(%s, 02775) failed: %s", userprefdir, strerror(errno));
++	if ((fst.st_mode & 07777) != config_mode) {
++		if (chmod(userprefdir, config_mode) < 0) {
++			usbmuxd_log(LL_WARNING, "chmod(%s, %04o) failed: %s", userprefdir, (unsigned int)config_mode, strerror(errno));
+ 		}
+ 	}
+ #endif

@@ -1,0 +1,30 @@
+.DS_Store
+xcuserdata/
+
+.build/
+dist/
+build-package/
+__pycache__/
+*.pyc
+
+tools/activation/build/
+
+build/
+docs/matrix-results.json.lock
+
+# Working notes and generated reports stay local; the user docs below are tracked
+docs/*
+!docs/ASSETS.md
+!docs/PERFORMANCE.md
+!docs/TODO.md
+!docs/GUEST-BENCHMARKS.md
+!docs/BUILDING.md
+!docs/PROFILING.md
+!docs/COMPATIBILITY.md
+!docs/DESKTOP.md
+!docs/NETWORK.md
+scripts/build.env
+*.profraw
+
+# Rust desktop app
+/target/

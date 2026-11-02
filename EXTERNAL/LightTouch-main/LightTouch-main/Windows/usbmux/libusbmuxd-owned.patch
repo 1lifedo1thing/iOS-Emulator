@@ -1,0 +1,26 @@
+--- a/src/libusbmuxd.c
++++ b/src/libusbmuxd.c
+@@ -161,8 +161,15 @@
+  * For Mac/Linux it is a unix domain socket,
+  * for Windows it is a tcp socket.
+  */
++#ifdef _WIN32
++#include "windows-connect.h"
++#endif
++
+ static int connect_usbmuxd_socket()
+ {
++#ifdef _WIN32
++	return ltw_connect_owned_daemon();
++#else
+ 	int res = -1;
+ 	char *usbmuxd_socket_addr = getenv("USBMUXD_SOCKET_ADDRESS");
+ 	if (usbmuxd_socket_addr) {
+@@ -227,6 +234,7 @@
+ 		res = -errno;
+ 	}
+ 	return res;
++#endif
+ }
+ 
+ static void sanitize_udid(usbmuxd_device_info_t *devinfo)

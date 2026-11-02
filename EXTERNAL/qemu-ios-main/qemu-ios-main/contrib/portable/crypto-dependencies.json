@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "packages": [
+    {
+      "name": "libgpg-error",
+      "version": "1.53",
+      "archive": "libgpg-error-1.53.tar.bz2",
+      "directory": "libgpg-error-1.53",
+      "url": "https://www.gnupg.org/ftp/gcrypt/libgpg-error/libgpg-error-1.53.tar.bz2",
+      "sha256": "6a0721b52027415f53abcbf63b5c37776a0f774d9126d560a3ce76c0eb42903f",
+      "license": "LGPL-2.1-or-later library; preserve archive notices",
+      "checksum_source": "Official GnuPG release archive SHA256 fetched 2026-10-14"
+    },
+    {
+      "name": "libgcrypt",
+      "version": "1.11.2",
+      "archive": "libgcrypt-1.11.2.tar.bz2",
+      "directory": "libgcrypt-1.11.2",
+      "url": "https://www.gnupg.org/ftp/gcrypt/libgcrypt/libgcrypt-1.11.2.tar.bz2",
+      "sha256": "6ba59dd192270e8c1d22ddb41a07d95dcdbc1f0fb02d03c4b54b235814330aac",
+      "license": "LGPL-2.1-or-later library; preserve archive notices",
+      "checksum_source": "Official GnuPG release archive SHA256 fetched 2026-10-14"
+    }
+  ]
+}

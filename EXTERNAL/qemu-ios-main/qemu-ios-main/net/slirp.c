@@ -1,0 +1,1550 @@
+/*
+ * QEMU System Emulator
+ *
+ * Copyright (c) 2003-2008 Fabrice Bellard
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
+#include "qemu/osdep.h"
+#include "qemu/log.h"
+#include "net/slirp.h"
+
+
+#if defined(CONFIG_SMBD_COMMAND)
+#include <pwd.h>
+#include <sys/wait.h>
+#endif
+#include "net/checksum.h"
+#include "net/eth.h"
+#include "net/net.h"
+#include "qom/object.h"
+#include "clients.h"
+#include "hub.h"
+#include "monitor/monitor.h"
+#include "qemu/error-report.h"
+#include "qemu/sockets.h"
+#include <libslirp.h>
+#include "chardev/char-fe.h"
+#include "system/system.h"
+#include "qemu/cutils.h"
+#include "qapi/error.h"
+#include "qobject/qdict.h"
+#include "util.h"
+#include "migration/register.h"
+#include "migration/vmstate.h"
+#include "migration/qemu-file-types.h"
+
+static int get_str_sep(char *buf, int buf_size, const char **pp, int sep)
+{
+    const char *p, *p1;
+    int len;
+    p = *pp;
+    p1 = strchr(p, sep);
+    if (!p1)
+        return -1;
+    len = p1 - p;
+    p1++;
+    if (buf_size > 0) {
+        if (len > buf_size - 1)
+            len = buf_size - 1;
+        memcpy(buf, p, len);
+        buf[len] = '\0';
+    }
+    *pp = p1;
+    return 0;
+}
+
+/* slirp network adapter */
+
+#define SLIRP_CFG_HOSTFWD 1
+
+struct slirp_config_str {
+    struct slirp_config_str *next;
+    int flags;
+    char str[1024];
+};
+
+struct GuestFwd {
+    CharFrontend hd;
+    struct in_addr server;
+    int port;
+    Slirp *slirp;
+};
+
+typedef struct SlirpState {
+    NetClientState nc;
+    QTAILQ_ENTRY(SlirpState) entry;
+    Slirp *slirp;
+    Notifier poll_notifier;
+    Notifier exit_notifier;
+#if defined(CONFIG_SMBD_COMMAND)
+    gchar *smb_dir;
+#endif
+    GSList *fwd;
+    bool restricted;
+    /* A dated machine's network clock (its "rtc-epoch"): seconds from the
+     * host's clock, and whether there is one (slirp_ntp_reply). */
+    int64_t ntp_offset;
+    bool ntp;
+} SlirpState;
+
+static struct slirp_config_str *slirp_configs;
+static QTAILQ_HEAD(, SlirpState) slirp_stacks =
+    QTAILQ_HEAD_INITIALIZER(slirp_stacks);
+
+static int slirp_hostfwd(SlirpState *s, const char *redir_str, Error **errp);
+static int slirp_guestfwd(SlirpState *s, const char *config_str, Error **errp);
+
+#if defined(CONFIG_SMBD_COMMAND)
+static int slirp_smb(SlirpState *s, const char *exported_dir,
+                     struct in_addr vserver_addr, Error **errp);
+static void slirp_smb_cleanup(SlirpState *s);
+#else
+static inline void slirp_smb_cleanup(SlirpState *s) { }
+#endif
+
+static ssize_t net_slirp_send_packet(const void *pkt, size_t pkt_len,
+                                     void *opaque)
+{
+    SlirpState *s = opaque;
+    uint8_t min_pkt[ETH_ZLEN];
+    size_t min_pktsz = sizeof(min_pkt);
+
+    if (net_peer_needs_padding(&s->nc)) {
+        if (eth_pad_short_frame(min_pkt, &min_pktsz, pkt, pkt_len)) {
+            pkt = min_pkt;
+            pkt_len = min_pktsz;
+        }
+    }
+
+    return qemu_send_packet(&s->nc, pkt, pkt_len);
+}
+
+#define NTP_LEN 48
+#define NTP_UNIX_EPOCH 2208988800ULL    /* 1900-01-01 to 1970-01-01, seconds */
+
+static void ntp_stamp(uint8_t *p, uint64_t unix_us)
+{
+    stl_be_p(p, unix_us / 1000000 + NTP_UNIX_EPOCH);
+    stl_be_p(p + 4, ((unix_us % 1000000) << 32) / 1000000);
+}
+
+/*
+ * A time server's answer to the guest's NTP request, from the machine's own
+ * clock. A dated machine (a beta before its expiry, a set date) keeps its
+ * clock, but iOS's timed sets the clock from NTP, and the internet's servers
+ * tell the host's year; so the network answers in the device's time, as the
+ * baseband's NITZ does. Any server: time.apple.com, time-ios.apple.com, a
+ * pool name or an address. `in` is the guest's Ethernet frame; the reply
+ * frame goes to `out` (14 + 40 + 8 + NTP_LEN bytes at most). Returns its
+ * length, or 0 when `in` is not an NTP client request (mode 3, UDP to port
+ * 123 over unfragmented IPv4 or over IPv6 without extension headers).
+ */
+static size_t slirp_ntp_reply(const uint8_t *in, size_t len, uint64_t unix_us,
+                              uint8_t *out)
+{
+    const uint8_t *ip = in + 14, *udp;
+    uint8_t *oip = out + 14, *oudp, *ntp;
+    size_t iplen;
+    uint32_t sum;
+
+    if (len < 14) {
+        return 0;
+    }
+    switch (lduw_be_p(in + 12)) {
+    case 0x0800:
+        iplen = len >= 14 + 20 ? (ip[0] & 0xf) * 4 : 0;
+        if (iplen < 20 || (ip[0] >> 4) != 4 || ip[9] != 17 ||
+            (lduw_be_p(ip + 6) & 0x3fff) || lduw_be_p(ip + 2) > len - 14 ||
+            lduw_be_p(ip + 2) < iplen + 8 + NTP_LEN) {
+            return 0;
+        }
+        break;
+    case 0x86dd:
+        iplen = 40;
+        if (len < 14 + 40 || (ip[0] >> 4) != 6 || ip[6] != 17 ||
+            lduw_be_p(ip + 4) > len - 14 - 40 || lduw_be_p(ip + 4) < 8 + NTP_LEN) {
+            return 0;
+        }
+        break;
+    default:
+        return 0;
+    }
+    udp = ip + iplen;
+    if (lduw_be_p(udp + 2) != 123 || lduw_be_p(udp + 4) < 8 + NTP_LEN ||
+        (udp[8] & 7) != 3) {
+        return 0;
+    }
+
+    memcpy(out, in + 6, 6);                     /* back to the guest */
+    memcpy(out + 6, in, 6);                     /* from the router it sent to */
+    memcpy(out + 12, in + 12, 2);
+    if (iplen == 40) {
+        memset(oip, 0, 40);
+        oip[0] = 0x60;
+        stw_be_p(oip + 4, 8 + NTP_LEN);
+        oip[6] = 17;
+        oip[7] = 64;
+        memcpy(oip + 8, ip + 24, 16);
+        memcpy(oip + 24, ip + 8, 16);
+        sum = net_checksum_add(32, oip + 8);
+    } else {
+        iplen = 20;
+        memset(oip, 0, 20);
+        oip[0] = 0x45;
+        stw_be_p(oip + 2, 20 + 8 + NTP_LEN);
+        oip[8] = 64;
+        oip[9] = 17;
+        memcpy(oip + 12, ip + 16, 4);
+        memcpy(oip + 16, ip + 12, 4);
+        stw_be_p(oip + 10, net_raw_checksum(oip, 20));
+        sum = net_checksum_add(8, oip + 12);
+    }
+    oudp = oip + iplen;
+    stw_be_p(oudp, 123);
+    memcpy(oudp + 2, udp, 2);
+    stw_be_p(oudp + 4, 8 + NTP_LEN);
+    stw_be_p(oudp + 6, 0);
+
+    ntp = oudp + 8;
+    memset(ntp, 0, NTP_LEN);
+    ntp[0] = (udp[8] & 0x38) | 4;               /* no leap warning, the client's version, server */
+    ntp[1] = 1;                                 /* stratum 1, as Apple's servers are */
+    ntp[2] = udp[8 + 2];                        /* the client's poll */
+    ntp[3] = (uint8_t)-20;                      /* precision: about a microsecond */
+    memcpy(ntp + 12, "GPSs", 4);
+    ntp_stamp(ntp + 16, unix_us);               /* reference */
+    memcpy(ntp + 24, udp + 8 + 40, 8);          /* originate: the client's transmit */
+    ntp_stamp(ntp + 32, unix_us);               /* receive */
+    ntp_stamp(ntp + 40, unix_us);               /* transmit */
+
+    /* the pseudo-header's addresses (above), protocol and length, then UDP */
+    sum += 17 + 8 + NTP_LEN + net_checksum_add(8 + NTP_LEN, oudp);
+    stw_be_p(oudp + 6, net_checksum_finish_nozero(sum));
+    return 14 + iplen + 8 + NTP_LEN;
+}
+
+static ssize_t net_slirp_receive(NetClientState *nc, const uint8_t *buf, size_t size)
+{
+    SlirpState *s = DO_UPCAST(SlirpState, nc, nc);
+
+    if (s->ntp && !s->restricted) {
+        uint8_t reply[14 + 40 + 8 + NTP_LEN];
+        size_t n = slirp_ntp_reply(buf, size,
+                                   g_get_real_time() + s->ntp_offset * 1000000,
+                                   reply);
+        if (n) {
+            net_slirp_send_packet(reply, n, s);
+            return size;
+        }
+    }
+    slirp_input(s->slirp, buf, size);
+
+    return size;
+}
+
+static void slirp_smb_exit(Notifier *n, void *data)
+{
+    SlirpState *s = container_of(n, SlirpState, exit_notifier);
+    slirp_smb_cleanup(s);
+}
+
+static void slirp_free_fwd(gpointer data)
+{
+    struct GuestFwd *fwd = data;
+
+    qemu_chr_fe_deinit(&fwd->hd, true);
+    g_free(data);
+}
+
+static void net_slirp_cleanup(NetClientState *nc)
+{
+    SlirpState *s = DO_UPCAST(SlirpState, nc, nc);
+
+    g_slist_free_full(s->fwd, slirp_free_fwd);
+    main_loop_poll_remove_notifier(&s->poll_notifier);
+    unregister_savevm(NULL, "slirp", s->slirp);
+    slirp_cleanup(s->slirp);
+    if (s->exit_notifier.notify) {
+        qemu_remove_exit_notifier(&s->exit_notifier);
+    }
+    slirp_smb_cleanup(s);
+    QTAILQ_REMOVE(&slirp_stacks, s, entry);
+}
+
+static NetClientInfo net_slirp_info = {
+    .type = NET_CLIENT_DRIVER_USER,
+    .size = sizeof(SlirpState),
+    .receive = net_slirp_receive,
+    .cleanup = net_slirp_cleanup,
+};
+
+static void net_slirp_guest_error(const char *msg, void *opaque)
+{
+    qemu_log_mask(LOG_GUEST_ERROR, "%s", msg);
+}
+
+static int64_t net_slirp_clock_get_ns(void *opaque)
+{
+    return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+}
+
+typedef struct SlirpTimer SlirpTimer;
+struct SlirpTimer {
+    QEMUTimer timer;
+#if SLIRP_CHECK_VERSION(4,7,0)
+    Slirp *slirp;
+    SlirpTimerId id;
+    void *cb_opaque;
+#endif
+};
+
+#if SLIRP_CHECK_VERSION(4,7,0)
+static void net_slirp_init_completed(Slirp *slirp, void *opaque)
+{
+    SlirpState *s = opaque;
+    s->slirp = slirp;
+}
+
+static void net_slirp_timer_cb(void *opaque)
+{
+    SlirpTimer *t = opaque;
+    slirp_handle_timer(t->slirp, t->id, t->cb_opaque);
+}
+
+static void *net_slirp_timer_new_opaque(SlirpTimerId id,
+                                        void *cb_opaque, void *opaque)
+{
+    SlirpState *s = opaque;
+    SlirpTimer *t = g_new(SlirpTimer, 1);
+    t->slirp = s->slirp;
+    t->id = id;
+    t->cb_opaque = cb_opaque;
+    timer_init_full(&t->timer, NULL, QEMU_CLOCK_VIRTUAL,
+                    SCALE_MS, QEMU_TIMER_ATTR_EXTERNAL,
+                    net_slirp_timer_cb, t);
+    return t;
+}
+#else
+static void *net_slirp_timer_new(SlirpTimerCb cb,
+                                 void *cb_opaque, void *opaque)
+{
+    SlirpTimer *t = g_new(SlirpTimer, 1);
+    timer_init_full(&t->timer, NULL, QEMU_CLOCK_VIRTUAL,
+                    SCALE_MS, QEMU_TIMER_ATTR_EXTERNAL,
+                    cb, cb_opaque);
+    return t;
+}
+#endif
+
+static void net_slirp_timer_free(void *timer, void *opaque)
+{
+    SlirpTimer *t = timer;
+    timer_del(&t->timer);
+    g_free(t);
+}
+
+static void net_slirp_timer_mod(void *timer, int64_t expire_timer,
+                                void *opaque)
+{
+    SlirpTimer *t = timer;
+    timer_mod(&t->timer, expire_timer);
+}
+
+#if !SLIRP_CHECK_VERSION(4, 9, 0)
+# define slirp_os_socket int
+# define slirp_pollfds_fill_socket slirp_pollfds_fill
+# define register_poll_socket register_poll_fd
+# define unregister_poll_socket unregister_poll_fd
+#endif
+
+static void net_slirp_register_poll_sock(slirp_os_socket fd, void *opaque)
+{
+#ifdef WIN32
+    AioContext *ctxt = qemu_get_aio_context();
+    g_autofree char *msg = NULL;
+
+    if (WSAEventSelect(fd, event_notifier_get_handle(&ctxt->notifier),
+                       FD_READ | FD_ACCEPT | FD_CLOSE |
+                       FD_CONNECT | FD_WRITE | FD_OOB) != 0) {
+        msg = g_win32_error_message(WSAGetLastError());
+        warn_report("failed to WSAEventSelect(): %s", msg);
+    }
+#endif
+}
+
+static void net_slirp_unregister_poll_sock(slirp_os_socket fd, void *opaque)
+{
+#ifdef WIN32
+    g_autofree char *msg = NULL;
+
+    if (WSAEventSelect(fd, NULL, 0) != 0) {
+        msg = g_win32_error_message(WSAGetLastError());
+        warn_report("failed to WSAEventSelect(): %s", msg);
+    }
+#endif
+}
+
+static void net_slirp_notify(void *opaque)
+{
+    qemu_notify_event();
+}
+
+static const SlirpCb slirp_cb = {
+    .send_packet = net_slirp_send_packet,
+    .guest_error = net_slirp_guest_error,
+    .clock_get_ns = net_slirp_clock_get_ns,
+#if SLIRP_CHECK_VERSION(4,7,0)
+    .init_completed = net_slirp_init_completed,
+    .timer_new_opaque = net_slirp_timer_new_opaque,
+#else
+    .timer_new = net_slirp_timer_new,
+#endif
+    .timer_free = net_slirp_timer_free,
+    .timer_mod = net_slirp_timer_mod,
+    .register_poll_socket = net_slirp_register_poll_sock,
+    .unregister_poll_socket = net_slirp_unregister_poll_sock,
+    .notify = net_slirp_notify,
+};
+
+static int slirp_poll_to_gio(int events)
+{
+    int ret = 0;
+
+    if (events & SLIRP_POLL_IN) {
+        ret |= G_IO_IN;
+    }
+    if (events & SLIRP_POLL_OUT) {
+        ret |= G_IO_OUT;
+    }
+    if (events & SLIRP_POLL_PRI) {
+        ret |= G_IO_PRI;
+    }
+    if (events & SLIRP_POLL_ERR) {
+        ret |= G_IO_ERR;
+    }
+    if (events & SLIRP_POLL_HUP) {
+        ret |= G_IO_HUP;
+    }
+
+    return ret;
+}
+
+static int net_slirp_add_poll(slirp_os_socket fd, int events, void *opaque)
+{
+    GArray *pollfds = opaque;
+    GPollFD pfd = {
+        .fd = fd,
+        .events = slirp_poll_to_gio(events),
+    };
+    int idx = pollfds->len;
+    g_array_append_val(pollfds, pfd);
+    return idx;
+}
+
+static int slirp_gio_to_poll(int events)
+{
+    int ret = 0;
+
+    if (events & G_IO_IN) {
+        ret |= SLIRP_POLL_IN;
+    }
+    if (events & G_IO_OUT) {
+        ret |= SLIRP_POLL_OUT;
+    }
+    if (events & G_IO_PRI) {
+        ret |= SLIRP_POLL_PRI;
+    }
+    if (events & G_IO_ERR) {
+        ret |= SLIRP_POLL_ERR;
+    }
+    if (events & G_IO_HUP) {
+        ret |= SLIRP_POLL_HUP;
+    }
+
+    return ret;
+}
+
+static int net_slirp_get_revents(int idx, void *opaque)
+{
+    GArray *pollfds = opaque;
+
+    return slirp_gio_to_poll(g_array_index(pollfds, GPollFD, idx).revents);
+}
+
+static void net_slirp_poll_notify(Notifier *notifier, void *data)
+{
+    MainLoopPoll *poll = data;
+    SlirpState *s = container_of(notifier, SlirpState, poll_notifier);
+
+    switch (poll->state) {
+    case MAIN_LOOP_POLL_FILL:
+        slirp_pollfds_fill_socket(s->slirp, &poll->timeout,
+                                  net_slirp_add_poll, poll->pollfds);
+        break;
+    case MAIN_LOOP_POLL_OK:
+    case MAIN_LOOP_POLL_ERR:
+        slirp_pollfds_poll(s->slirp, poll->state == MAIN_LOOP_POLL_ERR,
+                           net_slirp_get_revents, poll->pollfds);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static ssize_t
+net_slirp_stream_read(void *buf, size_t size, void *opaque)
+{
+    QEMUFile *f = opaque;
+
+    return qemu_get_buffer(f, buf, size);
+}
+
+static ssize_t
+net_slirp_stream_write(const void *buf, size_t size, void *opaque)
+{
+    QEMUFile *f = opaque;
+
+    qemu_put_buffer(f, buf, size);
+    if (qemu_file_get_error(f)) {
+        return -1;
+    }
+
+    return size;
+}
+
+static int net_slirp_state_load(QEMUFile *f, void *opaque, int version_id)
+{
+    Slirp *slirp = opaque;
+
+    return slirp_state_load(slirp, version_id, net_slirp_stream_read, f);
+}
+
+static void net_slirp_state_save(QEMUFile *f, void *opaque)
+{
+    Slirp *slirp = opaque;
+
+    slirp_state_save(slirp, net_slirp_stream_write, f);
+}
+
+static SaveVMHandlers savevm_slirp_state = {
+    .save_state = net_slirp_state_save,
+    .load_state = net_slirp_state_load,
+};
+
+static int net_slirp_init(NetClientState *peer, const char *model,
+                          const char *name, int restricted,
+                          bool ipv4, const char *vnetwork, const char *vhost,
+                          bool ipv6, const char *vprefix6, int vprefix6_len,
+                          const char *vhost6,
+                          const char *vhostname, const char *tftp_export,
+                          const char *bootfile, const char *vdhcp_start,
+                          const char *vnameserver, const char *vnameserver6,
+                          const char *smb_export, const char *vsmbserver,
+                          const char **dnssearch, const char *vdomainname,
+                          const char *tftp_server_name,
+                          Error **errp)
+{
+    /* default settings according to historic slirp */
+    struct in_addr net  = { .s_addr = htonl(0x0a000200) }; /* 10.0.2.0 */
+    struct in_addr mask = { .s_addr = htonl(0xffffff00) }; /* 255.255.255.0 */
+    struct in_addr host = { .s_addr = htonl(0x0a000202) }; /* 10.0.2.2 */
+    struct in_addr dhcp = { .s_addr = htonl(0x0a00020f) }; /* 10.0.2.15 */
+    struct in_addr dns  = { .s_addr = htonl(0x0a000203) }; /* 10.0.2.3 */
+    struct in6_addr ip6_prefix;
+    struct in6_addr ip6_host;
+    struct in6_addr ip6_dns;
+#if defined(CONFIG_SMBD_COMMAND)
+    struct in_addr smbsrv = { .s_addr = 0 };
+#endif
+    SlirpConfig cfg = { 0 };
+    NetClientState *nc;
+    SlirpState *s;
+    char buf[20];
+    uint32_t addr;
+    int shift;
+    char *end;
+    struct slirp_config_str *config;
+
+    if (!ipv4 && (vnetwork || vhost || vnameserver)) {
+        error_setg(errp, "IPv4 disabled but netmask/host/dns provided");
+        return -1;
+    }
+
+    if (!ipv6 && (vprefix6 || vhost6 || vnameserver6)) {
+        error_setg(errp, "IPv6 disabled but prefix/host6/dns6 provided");
+        return -1;
+    }
+
+    if (!ipv4 && !ipv6) {
+        /* It doesn't make sense to disable both */
+        error_setg(errp, "IPv4 and IPv6 disabled");
+        return -1;
+    }
+
+    if (vnetwork) {
+        if (get_str_sep(buf, sizeof(buf), &vnetwork, '/') < 0) {
+            if (!inet_aton(vnetwork, &net)) {
+                error_setg(errp, "Failed to parse netmask");
+                return -1;
+            }
+            addr = ntohl(net.s_addr);
+            if (!(addr & 0x80000000)) {
+                mask.s_addr = htonl(0xff000000); /* class A */
+            } else if ((addr & 0xfff00000) == 0xac100000) {
+                mask.s_addr = htonl(0xfff00000); /* priv. 172.16.0.0/12 */
+            } else if ((addr & 0xc0000000) == 0x80000000) {
+                mask.s_addr = htonl(0xffff0000); /* class B */
+            } else if ((addr & 0xffff0000) == 0xc0a80000) {
+                mask.s_addr = htonl(0xffff0000); /* priv. 192.168.0.0/16 */
+            } else if ((addr & 0xffff0000) == 0xc6120000) {
+                mask.s_addr = htonl(0xfffe0000); /* tests 198.18.0.0/15 */
+            } else if ((addr & 0xe0000000) == 0xe0000000) {
+                mask.s_addr = htonl(0xffffff00); /* class C */
+            } else {
+                mask.s_addr = htonl(0xfffffff0); /* multicast/reserved */
+            }
+        } else {
+            if (!inet_aton(buf, &net)) {
+                error_setg(errp, "Failed to parse netmask");
+                return -1;
+            }
+            shift = strtol(vnetwork, &end, 10);
+            if (*end != '\0') {
+                if (!inet_aton(vnetwork, &mask)) {
+                    error_setg(errp,
+                               "Failed to parse netmask (trailing chars)");
+                    return -1;
+                }
+            } else if (shift < 4 || shift > 32) {
+                error_setg(errp,
+                           "Invalid netmask provided (must be in range 4-32)");
+                return -1;
+            } else {
+                mask.s_addr = htonl(0xffffffff << (32 - shift));
+            }
+        }
+        net.s_addr &= mask.s_addr;
+        host.s_addr = net.s_addr | (htonl(0x0202) & ~mask.s_addr);
+        dhcp.s_addr = net.s_addr | (htonl(0x020f) & ~mask.s_addr);
+        dns.s_addr  = net.s_addr | (htonl(0x0203) & ~mask.s_addr);
+    }
+
+    if (vhost && !inet_aton(vhost, &host)) {
+        error_setg(errp, "Failed to parse host");
+        return -1;
+    }
+    if ((host.s_addr & mask.s_addr) != net.s_addr) {
+        error_setg(errp, "Host doesn't belong to network");
+        return -1;
+    }
+
+    if (vnameserver && !inet_aton(vnameserver, &dns)) {
+        error_setg(errp, "Failed to parse DNS");
+        return -1;
+    }
+    if (restricted && (dns.s_addr & mask.s_addr) != net.s_addr) {
+        error_setg(errp, "DNS doesn't belong to network");
+        return -1;
+    }
+    if (dns.s_addr == host.s_addr) {
+        error_setg(errp, "DNS must be different from host");
+        return -1;
+    }
+
+    if (vdhcp_start && !inet_aton(vdhcp_start, &dhcp)) {
+        error_setg(errp, "Failed to parse DHCP start address");
+        return -1;
+    }
+    if ((dhcp.s_addr & mask.s_addr) != net.s_addr) {
+        error_setg(errp, "DHCP doesn't belong to network");
+        return -1;
+    }
+    if (dhcp.s_addr == host.s_addr || dhcp.s_addr == dns.s_addr) {
+        error_setg(errp, "DHCP must be different from host and DNS");
+        return -1;
+    }
+
+#if defined(CONFIG_SMBD_COMMAND)
+    if (vsmbserver && !inet_aton(vsmbserver, &smbsrv)) {
+        error_setg(errp, "Failed to parse SMB address");
+        return -1;
+    }
+#endif
+
+    if (!vprefix6) {
+        vprefix6 = "fec0::";
+    }
+    if (!inet_pton(AF_INET6, vprefix6, &ip6_prefix)) {
+        error_setg(errp, "Failed to parse IPv6 prefix");
+        return -1;
+    }
+
+    if (!vprefix6_len) {
+        vprefix6_len = 64;
+    }
+    if (vprefix6_len < 0 || vprefix6_len > 126) {
+        error_setg(errp,
+                   "Invalid IPv6 prefix provided "
+                   "(IPv6 prefix length must be between 0 and 126)");
+        return -1;
+    }
+
+    if (vhost6) {
+        if (!inet_pton(AF_INET6, vhost6, &ip6_host)) {
+            error_setg(errp, "Failed to parse IPv6 host");
+            return -1;
+        }
+        if (!in6_equal_net(&ip6_prefix, &ip6_host, vprefix6_len)) {
+            error_setg(errp, "IPv6 Host doesn't belong to network");
+            return -1;
+        }
+    } else {
+        ip6_host = ip6_prefix;
+        ip6_host.s6_addr[15] |= 2;
+    }
+
+    if (vnameserver6) {
+        if (!inet_pton(AF_INET6, vnameserver6, &ip6_dns)) {
+            error_setg(errp, "Failed to parse IPv6 DNS");
+            return -1;
+        }
+        if (restricted && !in6_equal_net(&ip6_prefix, &ip6_dns, vprefix6_len)) {
+            error_setg(errp, "IPv6 DNS doesn't belong to network");
+            return -1;
+        }
+    } else {
+        ip6_dns = ip6_prefix;
+        ip6_dns.s6_addr[15] |= 3;
+    }
+
+    if (vdomainname && !*vdomainname) {
+        error_setg(errp, "'domainname' parameter cannot be empty");
+        return -1;
+    }
+
+    if (vdomainname && strlen(vdomainname) > 255) {
+        error_setg(errp, "'domainname' parameter cannot exceed 255 bytes");
+        return -1;
+    }
+
+    if (vhostname && strlen(vhostname) > 255) {
+        error_setg(errp, "'vhostname' parameter cannot exceed 255 bytes");
+        return -1;
+    }
+
+    if (tftp_server_name && strlen(tftp_server_name) > 255) {
+        error_setg(errp, "'tftp-server-name' parameter cannot exceed 255 bytes");
+        return -1;
+    }
+
+    nc = qemu_new_net_client(&net_slirp_info, peer, model, name);
+
+    qemu_set_info_str(nc, "net=%s,restrict=%s", inet_ntoa(net),
+                      restricted ? "on" : "off");
+
+    s = DO_UPCAST(SlirpState, nc, nc);
+    s->restricted = restricted;
+    {
+        /* A dated machine's clock, pinned at power-on and running on as its
+         * PMU's RTC does: its network's time servers tell the same. */
+        Object *m = object_resolve_path_component(object_get_root(), "machine");
+        uint64_t epoch = m && object_property_find(m, "rtc-epoch")
+                         ? object_property_get_uint(m, "rtc-epoch", NULL) : 0;
+        s->ntp = epoch != 0;
+        s->ntp_offset = epoch ? (int64_t)epoch - time(NULL) : 0;
+    }
+
+    cfg.version =
+         SLIRP_CHECK_VERSION(4, 9, 0) ? 6 :
+         SLIRP_CHECK_VERSION(4, 7, 0) ? 4 : 1;
+    cfg.restricted = restricted;
+    cfg.in_enabled = ipv4;
+    cfg.vnetwork = net;
+    cfg.vnetmask = mask;
+    cfg.vhost = host;
+    cfg.in6_enabled = ipv6;
+    cfg.vprefix_addr6 = ip6_prefix;
+    cfg.vprefix_len = vprefix6_len;
+    cfg.vhost6 = ip6_host;
+    cfg.vhostname = vhostname;
+    cfg.tftp_server_name = tftp_server_name;
+    cfg.tftp_path = tftp_export;
+    cfg.bootfile = bootfile;
+    cfg.vdhcp_start = dhcp;
+    cfg.vnameserver = dns;
+    cfg.vnameserver6 = ip6_dns;
+    cfg.vdnssearch = dnssearch;
+    cfg.vdomainname = vdomainname;
+    s->slirp = slirp_new(&cfg, &slirp_cb, s);
+    QTAILQ_INSERT_TAIL(&slirp_stacks, s, entry);
+
+    /*
+     * Make sure the current bitstream version of slirp is 4, to avoid
+     * QEMU migration incompatibilities, if upstream slirp bumped the
+     * version.
+     *
+     * FIXME: use bitfields of features? teach libslirp to save with
+     * specific version?
+     */
+    g_assert(slirp_state_version() == 4);
+    register_savevm_live("slirp", VMSTATE_INSTANCE_ID_ANY,
+                         slirp_state_version(), &savevm_slirp_state, s->slirp);
+
+    s->poll_notifier.notify = net_slirp_poll_notify;
+    main_loop_poll_add_notifier(&s->poll_notifier);
+
+    for (config = slirp_configs; config; config = config->next) {
+        if (config->flags & SLIRP_CFG_HOSTFWD) {
+            if (slirp_hostfwd(s, config->str, errp) < 0) {
+                goto error;
+            }
+        } else {
+            if (slirp_guestfwd(s, config->str, errp) < 0) {
+                goto error;
+            }
+        }
+    }
+#if defined(CONFIG_SMBD_COMMAND)
+    if (smb_export) {
+        if (slirp_smb(s, smb_export, smbsrv, errp) < 0) {
+            goto error;
+        }
+    }
+#endif
+
+    s->exit_notifier.notify = slirp_smb_exit;
+    qemu_add_exit_notifier(&s->exit_notifier);
+    return 0;
+
+error:
+    qemu_del_net_client(nc);
+    return -1;
+}
+
+static SlirpState *slirp_lookup(Monitor *mon, const char *id)
+{
+    if (id) {
+        NetClientState *nc = qemu_find_netdev(id);
+        if (!nc) {
+            monitor_printf(mon, "unrecognized netdev id '%s'\n", id);
+            return NULL;
+        }
+        if (strcmp(nc->model, "user")) {
+            monitor_printf(mon, "invalid device specified\n");
+            return NULL;
+        }
+        return DO_UPCAST(SlirpState, nc, nc);
+    } else {
+        if (QTAILQ_EMPTY(&slirp_stacks)) {
+            monitor_printf(mon, "user mode network stack not in use\n");
+            return NULL;
+        }
+        return QTAILQ_FIRST(&slirp_stacks);
+    }
+}
+
+/*
+ * Flip a running "user" netdev's slirp restrict flag in place. This changes
+ * only libslirp's per-connection outbound gate (the guest keeps its link,
+ * association and DHCP lease -- no netdev_del/add, no link event). `id` NULL
+ * means the first slirp stack. Returns 0 on success, -1 if no such stack.
+ */
+static SlirpState *net_slirp_find(const char *id)
+{
+    if (id) {
+        NetClientState *nc = qemu_find_netdev(id);
+        if (!nc || strcmp(nc->model, "user")) {
+            return NULL;
+        }
+        return DO_UPCAST(SlirpState, nc, nc);
+    }
+    return QTAILQ_FIRST(&slirp_stacks);
+}
+
+/* Allow or refuse the guest's traffic to the host's local networks, in place
+ * (libslirp's slirp_set_local_network), on stack `id` or, NULL, on every one.
+ * Returns -1 if no such stack. */
+int net_slirp_set_lan(const char *id, bool allowed)
+{
+    SlirpState *s = id ? net_slirp_find(id) : QTAILQ_FIRST(&slirp_stacks);
+
+    if (!s) {
+        return -1;
+    }
+    if (id) {
+        slirp_set_local_network(s->slirp, allowed);
+        return 0;
+    }
+    /* No id: every user netdev (a phone's wifi0 and cell0 open and close together). */
+    QTAILQ_FOREACH(s, &slirp_stacks, entry) {
+        slirp_set_local_network(s->slirp, allowed);
+    }
+    return 0;
+}
+
+int net_slirp_set_restrict(const char *id, bool restricted)
+{
+    SlirpState *s = net_slirp_find(id);
+
+    if (!s) {
+        return -1;
+    }
+
+    slirp_set_restricted(s->slirp, restricted);
+    s->restricted = restricted;
+    /* Keep "info network" truthful: net_slirp_init wrote "net=...,restrict=..." */
+    char *r = strstr(s->nc.info_str, "restrict=");
+    if (r) {
+        pstrcpy(r, sizeof(s->nc.info_str) - (r - s->nc.info_str),
+                restricted ? "restrict=on" : "restrict=off");
+    }
+    return 0;
+}
+
+void hmp_netdev_set_restrict(Monitor *mon, const QDict *qdict)
+{
+    const char *arg1 = qdict_get_str(qdict, "arg1");
+    const char *arg2 = qdict_get_try_str(qdict, "arg2");
+    const char *id, *state;
+    bool restricted;
+
+    /* "netdev_set_restrict [id] on|off"; one arg means id defaults to the
+     * only user stack. */
+    if (arg2) {
+        id = arg1;
+        state = arg2;
+    } else {
+        id = NULL;
+        state = arg1;
+    }
+
+    if (!strcmp(state, "on")) {
+        restricted = true;
+    } else if (!strcmp(state, "off")) {
+        restricted = false;
+    } else {
+        monitor_printf(mon, "expected 'on' or 'off', got '%s'\n", state);
+        return;
+    }
+
+    if (net_slirp_set_restrict(id, restricted) < 0) {
+        monitor_printf(mon, "no user mode network stack%s%s\n",
+                       id ? " with id " : "", id ? id : "");
+    }
+}
+
+void hmp_hostfwd_remove(Monitor *mon, const QDict *qdict)
+{
+    /* TODO: support removing unix fwd */
+    struct sockaddr_in host_addr = {
+        .sin_family = AF_INET,
+        .sin_addr = {
+            .s_addr = INADDR_ANY,
+        },
+    };
+    int host_port;
+    char buf[256];
+    const char *src_str, *p;
+    SlirpState *s;
+    int is_udp = 0;
+    int err;
+    const char *arg1 = qdict_get_str(qdict, "arg1");
+    const char *arg2 = qdict_get_try_str(qdict, "arg2");
+
+    if (arg2) {
+        s = slirp_lookup(mon, arg1);
+        src_str = arg2;
+    } else {
+        s = slirp_lookup(mon, NULL);
+        src_str = arg1;
+    }
+    if (!s) {
+        return;
+    }
+
+    p = src_str;
+    if (!p || get_str_sep(buf, sizeof(buf), &p, ':') < 0) {
+        goto fail_syntax;
+    }
+
+    if (!strcmp(buf, "tcp") || buf[0] == '\0') {
+        is_udp = 0;
+    } else if (!strcmp(buf, "udp")) {
+        is_udp = 1;
+    } else {
+        goto fail_syntax;
+    }
+
+    if (get_str_sep(buf, sizeof(buf), &p, ':') < 0) {
+        goto fail_syntax;
+    }
+    if (buf[0] != '\0' && !inet_aton(buf, &host_addr.sin_addr)) {
+        goto fail_syntax;
+    }
+
+    if (qemu_strtoi(p, NULL, 10, &host_port)) {
+        goto fail_syntax;
+    }
+    host_addr.sin_port = htons(host_port);
+
+#if SLIRP_CHECK_VERSION(4, 5, 0)
+    err = slirp_remove_hostxfwd(s->slirp, (struct sockaddr *) &host_addr,
+            sizeof(host_addr), is_udp ? SLIRP_HOSTFWD_UDP : 0);
+#else
+    err = slirp_remove_hostfwd(s->slirp, is_udp, host_addr.sin_addr, host_port);
+#endif
+
+    monitor_printf(mon, "host forwarding rule for %s %s\n", src_str,
+                   err ? "not found" : "removed");
+    return;
+
+ fail_syntax:
+    monitor_printf(mon, "invalid format\n");
+}
+
+static int slirp_hostfwd(SlirpState *s, const char *redir_str, Error **errp)
+{
+    union {
+        struct sockaddr_in in;
+#if !defined(WIN32) && SLIRP_CHECK_VERSION(4, 7, 0)
+        struct sockaddr_un un;
+#endif
+    } host_addr = {0};
+
+    struct sockaddr_in guest_addr = {
+        .sin_family = AF_INET,
+        .sin_addr = {
+            .s_addr = 0,
+        },
+    };
+    int err;
+    int host_port, guest_port;
+    const char *p;
+    char buf[256];
+    int is_udp = 0;
+#if !defined(WIN32) && SLIRP_CHECK_VERSION(4, 7, 0)
+    int is_unix = 0;
+#endif
+    const char *end;
+    const char *fail_reason = "Unknown reason";
+    socklen_t host_addr_size;
+
+    p = redir_str;
+    if (!p || get_str_sep(buf, sizeof(buf), &p, ':') < 0) {
+        fail_reason = "No : separators";
+        goto fail_syntax;
+    }
+    if (!strcmp(buf, "tcp") || buf[0] == '\0') {
+        is_udp = 0;
+    } else if (!strcmp(buf, "udp")) {
+        is_udp = 1;
+    }
+#if !defined(WIN32) && SLIRP_CHECK_VERSION(4, 7, 0)
+    else if (!strcmp(buf, "unix")) {
+        is_unix = 1;
+    }
+#endif
+    else {
+        fail_reason = "Bad protocol name";
+        goto fail_syntax;
+    }
+
+#if !defined(WIN32) && SLIRP_CHECK_VERSION(4, 7, 0)
+    if (is_unix) {
+        if (get_str_sep(buf, sizeof(buf), &p, '-') < 0) {
+            fail_reason = "Missing - separator";
+            goto fail_syntax;
+        }
+        if (buf[0] == '\0') {
+            fail_reason = "Missing unix socket path";
+            goto fail_syntax;
+        }
+        if (buf[0] != '/') {
+            fail_reason = "unix socket path must be absolute";
+            goto fail_syntax;
+        }
+
+        size_t path_len = strlen(buf);
+        if (path_len > sizeof(host_addr.un.sun_path) - 1) {
+            fail_reason = "Unix socket path is too long";
+            goto fail_syntax;
+        }
+
+        struct stat st;
+        if (stat(buf, &st) == 0) {
+            if (!S_ISSOCK(st.st_mode)) {
+                fail_reason = "file exists and it's not unix socket";
+                goto fail_syntax;
+            }
+
+            if (unlink(buf) < 0) {
+                error_setg_errno(errp, errno, "Failed to unlink '%s'", buf);
+                goto fail_syntax;
+            }
+        }
+        host_addr.un.sun_family = AF_UNIX;
+        memcpy(host_addr.un.sun_path, buf, path_len);
+        host_addr_size = sizeof(host_addr.un);
+    } else
+#endif
+    {
+        host_addr.in.sin_family = AF_INET;
+        host_addr.in.sin_addr.s_addr = INADDR_ANY;
+
+        if (get_str_sep(buf, sizeof(buf), &p, ':') < 0) {
+            fail_reason = "Missing : separator";
+            goto fail_syntax;
+        }
+
+        if (buf[0] != '\0' && !inet_aton(buf, &host_addr.in.sin_addr)) {
+            fail_reason = "Bad host address";
+            goto fail_syntax;
+        }
+
+        if (get_str_sep(buf, sizeof(buf), &p, '-') < 0) {
+            fail_reason = "Bad host port separator";
+            goto fail_syntax;
+        }
+
+        err = qemu_strtoi(buf, &end, 0, &host_port);
+        if (err || host_port < 0 || host_port > 65535) {
+            fail_reason = "Bad host port";
+            goto fail_syntax;
+        }
+
+        host_addr.in.sin_port = htons(host_port);
+        host_addr_size = sizeof(host_addr.in);
+    }
+
+    if (get_str_sep(buf, sizeof(buf), &p, ':') < 0) {
+        fail_reason = "Missing guest address";
+        goto fail_syntax;
+    }
+    if (buf[0] != '\0' && !inet_aton(buf, &guest_addr.sin_addr)) {
+        fail_reason = "Bad guest address";
+        goto fail_syntax;
+    }
+
+    err = qemu_strtoi(p, &end, 0, &guest_port);
+    if (err || guest_port < 1 || guest_port > 65535) {
+        fail_reason = "Bad guest port";
+        goto fail_syntax;
+    }
+    guest_addr.sin_port = htons(guest_port);
+
+#if SLIRP_CHECK_VERSION(4, 5, 0)
+    err = slirp_add_hostxfwd(s->slirp,
+            (struct sockaddr *) &host_addr, host_addr_size,
+            (struct sockaddr *) &guest_addr, sizeof(guest_addr),
+            is_udp ? SLIRP_HOSTFWD_UDP : 0);
+#else
+    (void) host_addr_size;
+    err = slirp_add_hostfwd(s->slirp, is_udp,
+            host_addr.in.sin_addr, host_port,
+            guest_addr.sin_addr, guest_port);
+#endif
+
+    if (err < 0) {
+        error_setg(errp, "Could not set up host forwarding rule '%s'",
+                   redir_str);
+        return -1;
+    }
+    return 0;
+
+ fail_syntax:
+    error_setg(errp, "Invalid host forwarding rule '%s' (%s)", redir_str,
+               fail_reason);
+    return -1;
+}
+
+void hmp_hostfwd_add(Monitor *mon, const QDict *qdict)
+{
+    const char *redir_str;
+    SlirpState *s;
+    const char *arg1 = qdict_get_str(qdict, "arg1");
+    const char *arg2 = qdict_get_try_str(qdict, "arg2");
+
+    if (arg2) {
+        s = slirp_lookup(mon, arg1);
+        redir_str = arg2;
+    } else {
+        s = slirp_lookup(mon, NULL);
+        redir_str = arg1;
+    }
+    if (s) {
+        Error *err = NULL;
+        if (slirp_hostfwd(s, redir_str, &err) < 0) {
+            error_report_err(err);
+        }
+    }
+
+}
+
+#if defined(CONFIG_SMBD_COMMAND)
+
+/* automatic user mode samba server configuration */
+static void slirp_smb_cleanup(SlirpState *s)
+{
+    int ret;
+
+    if (s->smb_dir) {
+        gchar *cmd = g_strdup_printf("rm -rf %s", s->smb_dir);
+        ret = system(cmd);
+        if (ret == -1 || !WIFEXITED(ret)) {
+            error_report("'%s' failed.", cmd);
+        } else if (WEXITSTATUS(ret)) {
+            error_report("'%s' failed. Error code: %d",
+                         cmd, WEXITSTATUS(ret));
+        }
+        g_free(cmd);
+        g_free(s->smb_dir);
+        s->smb_dir = NULL;
+    }
+}
+
+static int slirp_smb(SlirpState* s, const char *exported_dir,
+                     struct in_addr vserver_addr, Error **errp)
+{
+    char *smb_conf;
+    char *smb_cmdline;
+    struct passwd *passwd;
+    FILE *f;
+
+    passwd = getpwuid(geteuid());
+    if (!passwd) {
+        error_setg(errp, "Failed to retrieve user name");
+        return -1;
+    }
+
+    if (access(CONFIG_SMBD_COMMAND, F_OK)) {
+        error_setg(errp, "Could not find '%s', please install it",
+                   CONFIG_SMBD_COMMAND);
+        return -1;
+    }
+
+    if (access(exported_dir, R_OK | X_OK)) {
+        error_setg_errno(errp, errno,
+                         "Error accessing shared directory '%s'",
+                         exported_dir);
+        return -1;
+    }
+
+    s->smb_dir = g_dir_make_tmp("qemu-smb.XXXXXX", NULL);
+    if (!s->smb_dir) {
+        error_setg(errp, "Could not create samba server dir");
+        return -1;
+    }
+    smb_conf = g_strdup_printf("%s/%s", s->smb_dir, "smb.conf");
+
+    f = fopen(smb_conf, "w");
+    if (!f) {
+        int eno = errno;
+
+        slirp_smb_cleanup(s);
+        error_setg_errno(errp, eno,
+                   "Could not create samba server configuration file '%s'",
+                    smb_conf);
+        g_free(smb_conf);
+        return -1;
+    }
+    fprintf(f,
+            "[global]\n"
+            "private dir=%s\n"
+            "interfaces=127.0.0.1\n"
+            "bind interfaces only=yes\n"
+            "pid directory=%s\n"
+            "lock directory=%s\n"
+            "state directory=%s\n"
+            "cache directory=%s\n"
+            "ncalrpc dir=%s/ncalrpc\n"
+            "log file=%s/log.smbd\n"
+            "smb passwd file=%s/smbpasswd\n"
+            "security = user\n"
+            "map to guest = Bad User\n"
+            "load printers = no\n"
+            "printing = bsd\n"
+            "disable spoolss = yes\n"
+            "usershare max shares = 0\n"
+            "[qemu]\n"
+            "path=%s\n"
+            "read only=no\n"
+            "guest ok=yes\n"
+            "force user=%s\n",
+            s->smb_dir,
+            s->smb_dir,
+            s->smb_dir,
+            s->smb_dir,
+            s->smb_dir,
+            s->smb_dir,
+            s->smb_dir,
+            s->smb_dir,
+            exported_dir,
+            passwd->pw_name
+            );
+    fclose(f);
+
+    smb_cmdline = g_strdup_printf("%s -l %s -s %s",
+             CONFIG_SMBD_COMMAND, s->smb_dir, smb_conf);
+    g_free(smb_conf);
+
+    if (slirp_add_exec(s->slirp, smb_cmdline, &vserver_addr, 139) < 0 ||
+        slirp_add_exec(s->slirp, smb_cmdline, &vserver_addr, 445) < 0) {
+        slirp_smb_cleanup(s);
+        g_free(smb_cmdline);
+        error_setg(errp, "Conflicting/invalid smbserver address");
+        return -1;
+    }
+    g_free(smb_cmdline);
+    return 0;
+}
+
+#endif /* defined(CONFIG_SMBD_COMMAND) */
+
+static int guestfwd_can_read(void *opaque)
+{
+    struct GuestFwd *fwd = opaque;
+    return slirp_socket_can_recv(fwd->slirp, fwd->server, fwd->port);
+}
+
+static void guestfwd_read(void *opaque, const uint8_t *buf, int size)
+{
+    struct GuestFwd *fwd = opaque;
+    slirp_socket_recv(fwd->slirp, fwd->server, fwd->port, buf, size);
+}
+
+static ssize_t guestfwd_write(const void *buf, size_t len, void *chr)
+{
+    return qemu_chr_fe_write_all(chr, buf, len);
+}
+
+static int slirp_guestfwd(SlirpState *s, const char *config_str, Error **errp)
+{
+    /* TODO: IPv6 */
+    struct in_addr server = { .s_addr = 0 };
+    struct GuestFwd *fwd;
+    const char *p;
+    char buf[128];
+    char *end;
+    int port;
+
+    p = config_str;
+    if (get_str_sep(buf, sizeof(buf), &p, ':') < 0) {
+        goto fail_syntax;
+    }
+    if (strcmp(buf, "tcp") && buf[0] != '\0') {
+        goto fail_syntax;
+    }
+    if (get_str_sep(buf, sizeof(buf), &p, ':') < 0) {
+        goto fail_syntax;
+    }
+    if (buf[0] != '\0' && !inet_aton(buf, &server)) {
+        goto fail_syntax;
+    }
+    if (get_str_sep(buf, sizeof(buf), &p, '-') < 0) {
+        goto fail_syntax;
+    }
+    port = strtol(buf, &end, 10);
+    if (*end != '\0' || port < 1 || port > 65535) {
+        goto fail_syntax;
+    }
+
+    snprintf(buf, sizeof(buf), "guestfwd.tcp.%d", port);
+
+    if (g_str_has_prefix(p, "cmd:")) {
+        if (slirp_add_exec(s->slirp, &p[4], &server, port) < 0) {
+            error_setg(errp, "Conflicting/invalid host:port in guest "
+                       "forwarding rule '%s'", config_str);
+            return -1;
+        }
+    } else if (g_str_has_prefix(p, "unix:")) {
+        /* One private host connection per guest TCP connection, without nc or
+         * another subprocess. libslirp owns connection lifetime and backpressure. */
+        if (slirp_add_unix(s->slirp, p + 5, &server, port) < 0) {
+            error_setg(errp, "Invalid Unix guest forwarding rule '%s'", config_str);
+            return -1;
+        }
+    } else {
+        Error *err = NULL;
+        /*
+         * FIXME: sure we want to support implicit
+         * muxed monitors here?
+         */
+        Chardev *chr = qemu_chr_new_mux_mon(buf, p, NULL);
+
+        if (!chr) {
+            error_setg(errp, "Could not open guest forwarding device '%s'",
+                       buf);
+            return -1;
+        }
+
+        fwd = g_new(struct GuestFwd, 1);
+        qemu_chr_fe_init(&fwd->hd, chr, &err);
+        if (err) {
+            error_propagate(errp, err);
+            object_unparent(OBJECT(chr));
+            g_free(fwd);
+            return -1;
+        }
+
+        if (slirp_add_guestfwd(s->slirp, guestfwd_write, &fwd->hd,
+                               &server, port) < 0) {
+            error_setg(errp, "Conflicting/invalid host:port in guest "
+                       "forwarding rule '%s'", config_str);
+            qemu_chr_fe_deinit(&fwd->hd, true);
+            g_free(fwd);
+            return -1;
+        }
+        fwd->server = server;
+        fwd->port = port;
+        fwd->slirp = s->slirp;
+
+        qemu_chr_fe_set_handlers(&fwd->hd, guestfwd_can_read, guestfwd_read,
+                                 NULL, NULL, fwd, NULL, true);
+        s->fwd = g_slist_append(s->fwd, fwd);
+    }
+    return 0;
+
+ fail_syntax:
+    error_setg(errp, "Invalid guest forwarding rule '%s'", config_str);
+    return -1;
+}
+
+void hmp_info_usernet(Monitor *mon, const QDict *qdict)
+{
+    SlirpState *s;
+
+    QTAILQ_FOREACH(s, &slirp_stacks, entry) {
+        int id;
+        bool got_hub_id = net_hub_id_for_client(&s->nc, &id) == 0;
+        char *info = slirp_connection_info(s->slirp);
+        monitor_printf(mon, "Hub %d (%s):\n%s",
+                       got_hub_id ? id : -1,
+                       s->nc.name, info);
+        g_free(info);
+    }
+}
+
+static void
+net_init_slirp_configs(const StringList *fwd, int flags)
+{
+    while (fwd) {
+        struct slirp_config_str *config;
+
+        config = g_malloc0(sizeof(*config));
+        pstrcpy(config->str, sizeof(config->str), fwd->value->str);
+        config->flags = flags;
+        config->next = slirp_configs;
+        slirp_configs = config;
+
+        fwd = fwd->next;
+    }
+}
+
+static const char **slirp_dnssearch(const StringList *dnsname)
+{
+    const StringList *c = dnsname;
+    size_t i = 0, num_opts = 0;
+    const char **ret;
+
+    while (c) {
+        num_opts++;
+        c = c->next;
+    }
+
+    if (num_opts == 0) {
+        return NULL;
+    }
+
+    ret = g_malloc((num_opts + 1) * sizeof(*ret));
+    c = dnsname;
+    while (c) {
+        ret[i++] = c->value->str;
+        c = c->next;
+    }
+    ret[i] = NULL;
+    return ret;
+}
+
+int net_init_slirp(const Netdev *netdev, const char *name,
+                   NetClientState *peer, Error **errp)
+{
+    struct slirp_config_str *config;
+    char *vnet;
+    int ret;
+    const NetdevUserOptions *user;
+    const char **dnssearch;
+    bool ipv4 = true, ipv6 = true;
+
+    assert(netdev->type == NET_CLIENT_DRIVER_USER);
+    user = &netdev->u.user;
+
+    if ((user->has_ipv6 && user->ipv6 && !user->has_ipv4) ||
+        (user->has_ipv4 && !user->ipv4)) {
+        ipv4 = 0;
+    }
+    if ((user->has_ipv4 && user->ipv4 && !user->has_ipv6) ||
+        (user->has_ipv6 && !user->ipv6)) {
+        ipv6 = 0;
+    }
+
+    vnet = user->net ? g_strdup(user->net) :
+           user->ip  ? g_strdup_printf("%s/24", user->ip) :
+           NULL;
+
+    dnssearch = slirp_dnssearch(user->dnssearch);
+
+    /* all optional fields are initialized to "all bits zero" */
+
+    net_init_slirp_configs(user->hostfwd, SLIRP_CFG_HOSTFWD);
+    net_init_slirp_configs(user->guestfwd, 0);
+
+    ret = net_slirp_init(peer, "user", name, user->q_restrict,
+                         ipv4, vnet, user->host,
+                         ipv6, user->ipv6_prefix, user->ipv6_prefixlen,
+                         user->ipv6_host, user->hostname, user->tftp,
+                         user->bootfile, user->dhcpstart,
+                         user->dns, user->ipv6_dns, user->smb,
+                         user->smbserver, dnssearch, user->domainname,
+                         user->tftp_server_name, errp);
+    if (ret == 0) {
+#if defined(CONFIG_DARWIN) || defined(__ANDROID__)
+        struct sockaddr_in dns;
+        if (net_slirp_dns_forward(&dns)) {
+            slirp_set_dns_forward(QTAILQ_LAST(&slirp_stacks)->slirp, &dns);
+        }
+#endif
+        if (user->has_lan && !user->lan) {
+            slirp_set_local_network(QTAILQ_LAST(&slirp_stacks)->slirp, false);
+        }
+
+    }
+
+    while (slirp_configs) {
+        config = slirp_configs;
+        slirp_configs = config->next;
+        g_free(config);
+    }
+
+    g_free(vnet);
+    g_free(dnssearch);
+
+    return ret;
+}

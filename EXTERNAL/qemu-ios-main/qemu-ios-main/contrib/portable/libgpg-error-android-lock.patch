@@ -1,0 +1,22 @@
+--- a/configure.ac
++++ b/configure.ac
+@@ -633,7 +633,7 @@
+   AC_MSG_NOTICE([generated src/lock-obj-pub.native.h for $host])
+ elif test x$cross_compiling = xyes; then
+   case $host in
+-    *-*-gnu* | *-*-linux-gnu* | *-*-linux-musl*)
++    *-*-gnu* | *-*-linux-gnu* | *-*-linux-musl* | *-*-linux-android*)
+     AC_CHECK_TOOL(OBJDUMP, [objdump])
+     if test -n "$OBJDUMP"; then
+       lock_obj_h_generated=yes
+--- a/configure
++++ b/configure
+@@ -19954,7 +19954,7 @@
+ printf "%s\n" "$as_me: generated src/lock-obj-pub.native.h for $host" >&6;}
+ elif test x$cross_compiling = xyes; then
+   case $host in
+-    *-*-gnu* | *-*-linux-gnu* | *-*-linux-musl*)
++    *-*-gnu* | *-*-linux-gnu* | *-*-linux-musl* | *-*-linux-android*)
+     if test -n "$ac_tool_prefix"; then
+   # Extract the first word of "${ac_tool_prefix}objdump", so it can be a program name with args.
+ set dummy ${ac_tool_prefix}objdump; ac_word=$2

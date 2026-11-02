@@ -1,0 +1,11 @@
+--- a/src/usb-qemu.c
++++ b/src/usb-qemu.c
+@@ -28,6 +28,8 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <stdint.h>
++#include <stdbool.h>
++#include <time.h>
+ #include <string.h>
+ #include <errno.h>
+ #include <unistd.h>

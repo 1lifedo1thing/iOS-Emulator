@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "macos_deployment_target": "14.0",
+  "architecture": "arm64",
+  "packages": [
+    {
+      "name": "glib",
+      "version": "2.88.3",
+      "groups": [
+        "native"
+      ],
+      "archive": "glib-2.88.3.tar.xz",
+      "cache_aliases": [
+        "glib.tar.xz"
+      ],
+      "directory": "glib-2.88.3",
+      "url": "https://download.gnome.org/sources/glib/2.88/glib-2.88.3.tar.xz",
+      "sha256": "ab24d24e698dfa1e408b7bcdb508f4aafc906185a8b8ce72fdf79bbbdc9b383b",
+      "checksum_source": "Preserved from scripts/build-package-native.sh before dependency consolidation (2026-09-11)."
+    },
+    {
+      "name": "pcre2",
+      "version": "10.48",
+      "groups": [
+        "native"
+      ],
+      "archive": "pcre2-10.48.tar.bz2",
+      "cache_aliases": [
+        "pcre2.tar.bz2"
+      ],
+      "directory": "pcre2-10.48",
+      "url": "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.48/pcre2-10.48.tar.bz2",
+      "sha256": "b6c68fdf6f3ac31388b50aa89ff0fc49c00c987c16e7b5146491d12003f2c8ed",
+      "checksum_source": "Preserved from scripts/build-package-native.sh before dependency consolidation (2026-09-11)."
+    },
+    {
+      "name": "pixman",
+      "version": "0.46.4",
+      "groups": [
+        "native"
+      ],
+      "archive": "pixman-0.46.4.tar.gz",
+      "cache_aliases": [
+        "pixman.tar.gz"
+      ],
+      "directory": "pixman-0.46.4",
+      "url": "https://cairographics.org/releases/pixman-0.46.4.tar.gz",
+      "sha256": "d09c44ebc3bd5bee7021c79f922fe8fb2fb57f7320f55e97ff9914d2346a591c",
+      "checksum_source": "Preserved from scripts/build-package-native.sh before dependency consolidation (2026-09-11)."
+    },
+    {
+      "name": "slirp",
+      "version": "4.9.4",
+      "groups": [
+        "native"
+      ],
+      "archive": "libslirp-v4.9.4.tar.gz",
+      "cache_aliases": [
+        "slirp.tar.gz"
+      ],
+      "directory": "libslirp-v4.9.4",
+      "url": "https://gitlab.freedesktop.org/slirp/libslirp/-/archive/v4.9.4/libslirp-v4.9.4.tar.gz",
+      "sha256": "3998863b020aeda34bddc567097c6efba55a78cdf6eeee6bcd42c11ef23967da",
+      "checksum_source": "Preserved from scripts/build-package-native.sh before dependency consolidation (2026-09-11)."
+    },
+    {
+      "name": "libusb",
+      "version": "1.0.30",
+      "groups": [
+        "native"
+      ],
+      "archive": "libusb-1.0.30.tar.bz2",
+      "cache_aliases": [
+        "libusb.tar.bz2"
+      ],
+      "directory": "libusb-1.0.30",
+      "url": "https://github.com/libusb/libusb/releases/download/v1.0.30/libusb-1.0.30.tar.bz2",
+      "sha256": "fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf",
+      "checksum_source": "Preserved from scripts/build-package-native.sh before dependency consolidation (2026-09-11)."
+    },
+    {
+      "name": "proxy-libintl",
+      "version": "0.5",
+      "groups": [
+        "native"
+      ],
+      "archive": "proxy-libintl-0.5.tar.gz",
+      "cache_aliases": [
+        "proxy-libintl.tar.gz"
+      ],
+      "directory": "proxy-libintl-0.5",
+      "url": "https://github.com/frida/proxy-libintl/archive/refs/tags/0.5.tar.gz",
+      "sha256": "f7a1cbd7579baaf575c66f9d99fb6295e9b0684a28b095967cfda17857595303",
+      "checksum_source": "Preserved from scripts/build-package-native.sh before dependency consolidation (2026-09-11)."
+    },
+    {
+      "name": "libplist",
+      "version": "2.7.0",
+      "groups": [
+        "native",
+        "static"
+      ],
+      "archive": "libplist-2.7.0.tar.bz2",
+      "cache_aliases": [
+        "libplist.tar.bz2"
+      ],
+      "directory": "libplist-2.7.0",
+      "url": "https://github.com/libimobiledevice/libplist/releases/download/2.7.0/libplist-2.7.0.tar.bz2",
+      "sha256": "7ac42301e896b1ebe3c654634780c82baa7cb70df8554e683ff89f7c2643eb8b",
+      "checksum_source": "Preserved from scripts/build-package-native.sh before dependency consolidation (2026-09-11)."
+    },
+    {
+      "name": "libimobiledevice",
+      "version": "1.4.0",
+      "groups": [
+        "native",
+        "static"
+      ],
+      "archive": "libimobiledevice-1.4.0.tar.bz2",
+      "cache_aliases": [
+        "libimobiledevice.tar.bz2"
+      ],
+      "directory": "libimobiledevice-1.4.0",
+      "url": "https://github.com/libimobiledevice/libimobiledevice/releases/download/1.4.0/libimobiledevice-1.4.0.tar.bz2",
+      "sha256": "23cc0077e221c7d991bd0eb02150a0d49199bcca1ddf059edccee9ffd914939d",
+      "checksum_source": "Preserved from scripts/build-package-native.sh before dependency consolidation (2026-09-11)."
+    },
+    {
+      "name": "ffmpeg",
+      "version": "9.0.1",
+      "groups": [
+        "native"
+      ],
+      "archive": "ffmpeg-9.0.1.tar.xz",
+      "cache_aliases": [
+        "ffmpeg.tar.xz"
+      ],
+      "directory": "ffmpeg-9.0.1",
+      "url": "https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz",
+      "sha256": "cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635",
+      "checksum_source": "Preserved from scripts/build-package-native.sh before dependency consolidation (2026-09-11)."
+    },
+    {
+      "name": "openssl",
+      "version": "3.6.3",
+      "groups": [
+        "static"
+      ],
+      "archive": "openssl-3.6.3.tar.gz",
+      "directory": "openssl-3.6.3",
+      "url": "https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz",
+      "sha256": "243a86649cf6f23eeb6a2ff2456e09e5d77dd9018a54d3d96b0c6bdd6ba6c7f1",
+      "checksum_source": "https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz.sha256"
+    },
+    {
+      "name": "nettle",
+      "version": "3.10.2",
+      "groups": [
+        "static"
+      ],
+      "archive": "nettle-3.10.2.tar.gz",
+      "directory": "nettle-3.10.2",
+      "url": "https://ftp.gnu.org/gnu/nettle/nettle-3.10.2.tar.gz",
+      "sha256": "fe9ff51cb1f2abb5e65a6b8c10a92da0ab5ab6eaf26e7fc2b675c45f1fb519b5",
+      "checksum_source": "nettle-3.10.2.tar.gz.sig verified against the GNU keyring (Niels Möller, RSA 343C2FF0FBEE5EC2EDBEF399F3599FF828C67298) on 2026-10-07"
+    },
+    {
+      "name": "libimobiledevice-glue",
+      "version": "1.3.2",
+      "groups": [
+        "static"
+      ],
+      "archive": "libimobiledevice-glue-1.3.2.tar.bz2",
+      "directory": "libimobiledevice-glue-1.3.2",
+      "url": "https://github.com/libimobiledevice/libimobiledevice-glue/releases/download/1.3.2/libimobiledevice-glue-1.3.2.tar.bz2",
+      "sha256": "6489a3411b874ecd81c87815d863603f518b264a976319725e0ed59935546774",
+      "checksum_source": "https://api.github.com/repos/libimobiledevice/libimobiledevice-glue/releases/tags/1.3.2 (assets[].digest, verified 2026-09-11)"
+    },
+    {
+      "name": "libusbmuxd",
+      "version": "2.1.1",
+      "groups": [
+        "static"
+      ],
+      "archive": "libusbmuxd-2.1.1.tar.bz2",
+      "directory": "libusbmuxd-2.1.1",
+      "url": "https://github.com/libimobiledevice/libusbmuxd/releases/download/2.1.1/libusbmuxd-2.1.1.tar.bz2",
+      "sha256": "5546f1aba1c3d1812c2b47d976312d00547d1044b84b6a461323c621f396efce",
+      "checksum_source": "https://api.github.com/repos/libimobiledevice/libusbmuxd/releases/tags/2.1.1 (assets[].digest, verified 2026-09-11)"
+    },
+    {
+      "name": "libtatsu",
+      "version": "1.0.5",
+      "groups": [
+        "static"
+      ],
+      "archive": "libtatsu-1.0.5.tar.bz2",
+      "directory": "libtatsu-1.0.5",
+      "url": "https://github.com/libimobiledevice/libtatsu/releases/download/1.0.5/libtatsu-1.0.5.tar.bz2",
+      "sha256": "536fa228b14f156258e801a7f4d25a3a9dd91bb936bf6344e23171403c57e440",
+      "checksum_source": "https://api.github.com/repos/libimobiledevice/libtatsu/releases/tags/1.0.5 (assets[].digest, verified 2026-09-11)"
+    },
+    {
+      "name": "iBoot32Patcher",
+      "version": "1ff9bd14648efae691ed23ae0abb55a4635111e3",
+      "groups": [
+        "tools"
+      ],
+      "archive": "iBoot32Patcher-1ff9bd14648efae691ed23ae0abb55a4635111e3.tar.gz",
+      "directory": "iBoot32Patcher-1ff9bd14648efae691ed23ae0abb55a4635111e3",
+      "url": "https://github.com/LukeZGD/iBoot32Patcher/archive/1ff9bd14648efae691ed23ae0abb55a4635111e3.tar.gz",
+      "sha256": "8e6740aa1a248af8cf26aa7af1d785dbc089c67f510db282cc4c9dd529d4cb2f",
+      "license": "GPL-3.0-or-later",
+      "checksum_source": "SHA-256 calculated from this GitHub archive on 2026-09-28. LukeZGD's fork (the one Legacy-iOS-Kit ships), master of 2026-09-14. firmwarekit runs it as a separate process (K48IBoot.patchIBoot) for the k48 iboot recipe. Built with build-support/patches/iBoot32Patcher-ltm.patch (word-aligned xref matches only, smoke #48; the 32-bit Thumb-2 structs retyped to uint32_t bit-fields, which GCC needs to lay them out as one word); K48IBootTests checks its output byte-for-byte against the Legacy-iOS-Kit v25.09.01 binary on every k48 build that binary patches."
+    }
+  ]
+}

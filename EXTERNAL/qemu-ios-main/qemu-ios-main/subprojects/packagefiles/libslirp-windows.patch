@@ -1,0 +1,62 @@
+diff --git a/meson.build b/meson.build
+index b3da9d7b..c766b289 100644
+--- a/meson.build
++++ b/meson.build
+@@ -97,6 +97,11 @@ cargs = [
+   '-DBUILDING_LIBSLIRP',
+ ]
+ 
++# A static libslirp (QEMU's subproject fallback) has no DLL to import from or
++# export to: on Windows SLIRP_EXPORT must be empty for it and its users.
++static_cargs = get_option('default_library') == 'static' ? ['-DLIBSLIRP_STATIC'] : []
++cargs += static_cargs
++
+ if glib_static == true
+   # This likely only applies to Windows... but... need to ensure that
+   # glib-2.0 doesn't set import/export defines.
+@@ -272,6 +277,7 @@ endif
+ 
+ libslirp_libdep = declare_dependency(
+   link_with : lib,
++  compile_args : static_cargs,
+   include_directories : [include_directories('src'), include_directories('.')],
+ )
+ meson.override_dependency('slirp', libslirp_libdep)
+diff --git a/src/misc.c b/src/misc.c
+index e5e21644..6491055f 100644
+--- a/src/misc.c
++++ b/src/misc.c
+@@ -6,6 +6,8 @@
+ #include "slirp.h"
+ #ifdef G_OS_UNIX
+ #include <sys/un.h>
++#elif defined(_WIN32)
++#include <afunix.h> /* AF_UNIX stream sockets: Windows 10 1803 and later */
+ #endif
+ 
+ void slirp_insque(void *a, void *b)
+@@ -257,9 +259,9 @@ int fork_exec(struct socket *so, const char *ex)
+ 
+ int open_unix(struct socket *so, const char *unixpath)
+ {
+-#ifdef G_OS_UNIX
++#if defined(G_OS_UNIX) || defined(_WIN32)
+     struct sockaddr_un sa;
+-    int s;
++    slirp_os_socket s;
+ 
+     DEBUG_CALL("open_unix");
+     DEBUG_ARG("so = %p", so);
+diff --git a/src/slirp.c b/src/slirp.c
+index bd64e437..ba2279ca 100644
+--- a/src/slirp.c
++++ b/src/slirp.c
+@@ -1683,7 +1683,7 @@ int slirp_add_exec(Slirp *slirp, const char *cmdline,
+ int slirp_add_unix(Slirp *slirp, const char *unixsock,
+                    struct in_addr *guest_addr, int guest_port)
+ {
+-#ifdef G_OS_UNIX
++#if defined(G_OS_UNIX) || defined(_WIN32)
+     if (!check_guestfwd(slirp, guest_addr, guest_port)) {
+         return -1;
+     }

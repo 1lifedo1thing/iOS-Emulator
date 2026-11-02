@@ -1,0 +1,2 @@
+# Unified patches use a context-prefix space on otherwise blank lines.
+/build-support/patches/*.patch whitespace=-blank-at-eol

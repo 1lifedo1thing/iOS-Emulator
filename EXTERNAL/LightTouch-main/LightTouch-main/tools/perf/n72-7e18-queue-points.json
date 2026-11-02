@@ -1,0 +1,184 @@
+{
+  "points": [
+    {
+      "pc": 858687880,
+      "name": "swap-end",
+      "role": "entry"
+    },
+    {
+      "pc": 858687936,
+      "name": "swap-end",
+      "role": "exit"
+    },
+    {
+      "pc": 858689280,
+      "name": "swap-begin",
+      "role": "entry"
+    },
+    {
+      "pc": 858689404,
+      "name": "swap-begin",
+      "role": "exit"
+    },
+    {
+      "pc": 858690476,
+      "name": "swap-set-layer",
+      "role": "entry"
+    },
+    {
+      "pc": 858691448,
+      "name": "swap-set-layer",
+      "role": "exit"
+    },
+    {
+      "pc": 866389000,
+      "name": "surface-unlock-nonnull",
+      "role": "entry"
+    },
+    {
+      "pc": 866389008,
+      "name": "surface-unlock-nonnull",
+      "role": "exit"
+    },
+    {
+      "pc": 858690576,
+      "name": "swap-set-layer",
+      "role": "surface-id"
+    },
+    {
+      "pc": 3221656108,
+      "name": "scheduled-thread",
+      "role": "switch"
+    },
+    {
+      "pc": 3221656260,
+      "name": "scheduled-thread",
+      "role": "switch"
+    },
+    {
+      "pc": 3221657844,
+      "name": "scheduled-thread",
+      "role": "switch"
+    },
+    {
+      "pc": 3221371565,
+      "name": "enqueue-request",
+      "role": "enqueue"
+    },
+    {
+      "pc": 834589132,
+      "name": "ca-native-swap",
+      "role": "entry"
+    },
+    {
+      "pc": 834589568,
+      "name": "ca-native-swap",
+      "role": "exit"
+    },
+    {
+      "pc": 834589416,
+      "name": "ca-native-swap",
+      "role": "surface-id"
+    },
+    {
+      "pc": 834589468,
+      "name": "ca-image-queue-insert",
+      "role": "entry"
+    },
+    {
+      "pc": 834589472,
+      "name": "ca-image-queue-insert",
+      "role": "exit"
+    },
+    {
+      "pc": 834516900,
+      "name": "ca-finish-update",
+      "role": "observation"
+    },
+    {
+      "pc": 834518568,
+      "name": "ca-finish-done",
+      "role": "observation"
+    },
+    {
+      "pc": 834517052,
+      "name": "ca-primary-flags",
+      "role": "observation"
+    },
+    {
+      "pc": 834520788,
+      "name": "ca-begin-update",
+      "role": "observation"
+    },
+    {
+      "pc": 834217824,
+      "name": "ca-render-queue-entry",
+      "role": "observation"
+    },
+    {
+      "pc": 834219112,
+      "name": "ca-render-queue-done",
+      "role": "observation"
+    },
+    {
+      "pc": 834217876,
+      "name": "ca-render-generation",
+      "role": "observation"
+    },
+    {
+      "pc": 834157404,
+      "name": "ca-copy-image-info",
+      "role": "entry"
+    },
+    {
+      "pc": 834158556,
+      "name": "ca-copy-image-info",
+      "role": "exit"
+    },
+    {
+      "pc": 834218032,
+      "name": "ca-render-image-serial",
+      "role": "observation"
+    },
+    {
+      "pc": 834158528,
+      "name": "ca-copy-selected-serial",
+      "role": "observation"
+    },
+    {
+      "pc": 834218976,
+      "name": "ca-shmem-update-entry",
+      "role": "observation"
+    },
+    {
+      "pc": 834218980,
+      "name": "ca-shmem-update-done",
+      "role": "observation"
+    },
+    {
+      "pc": 834158712,
+      "name": "ca-insert-serial",
+      "role": "observation"
+    }
+  ],
+  "notes": [
+    "All API points ARM; enqueue Thumb. Return points are before epilogues; not proof of function return completion.",
+    "Unlock starts only on the nonnull path before loading the internal client pointer.",
+    "Entry and matching epilogue points selected from matching cache disassembly; no firmware modification.",
+    "SwapBegin successful epilogue r3 retains the token loaded at 0x332e8f54.",
+    "nativeWindow constructor stores native_window_swap at drawable+0x10 (0x31becec4); present callback verified from literal 0x304 at 0x31becfa8.",
+    "native swap entry r0 drawable; r1 flags. At surface-id point r0 is IOSurfaceGetID result. Submit boundary is before bl CAImageQueueInsertImage, next point observes returned r0.",
+    "finish-done is a void-function epilogue, not a success result. begin-update entry is a void function boundary.",
+    "CopyImageInfo entry r0 is the shared queue handle, r1/r2 time double bits. At its epilogue r0 is a boolean. Selected-serial point observes r0 serial before storing to output+4 at r1; a later boolean return is still required.",
+    "Render queue entry r0 is this. At generation cmp (0x31b92794), r0=this, r1=update object, r2=cached generation, r3=update generation. The equal branch bypasses the queue query. Both generation values are loaded before this point.",
+    "Render image serial point is before cmp r1,r3: r1=selected serial, r3=previous serial. A reached comparison does not prove the image is changed because a timestamp equality comparison follows.",
+    "Render queue entry/done and shmem-update entry/done are void observations, not success results. shmem update entry r0=queue, r1=update owner+0xac, r2/r3 retain time bits; flags are on the unobserved stack.",
+    "Producer and consumer shared queue addresses belong to different processes. Equal numeric pointers are not queue identity; serial equality and ordered surface association alone are not independent shared-memory proof.",
+    "SwapWait, native buffer acquisition and descriptor-absent points removed to stay within the 32 point limit. Scheduling and nonnull unlock observations retained.",
+    "Insert base-serial point precedes str r3 to slot+0x24; r3 came from shared queue+0xc. Later 0x31b84140 increments the slot serial if flags&6. The pinned native caller selects 0x10002/0x10003, optionally OR 0x10/0x1, so bit1 is always set. For a successful nested insert from that callsite, predicted published serial is base+1 modulo32bits. This is static control-flow derivation, not a direct post-increment snapshot; preserve the observed base and the derivation."
+  ],
+  "symbol_sha256": {
+    "kernel": "8caf1738b15fe4df99ddebb1f976b8582364af27ef738b93dcac60be1b26c63e",
+    "dyld_cache": "bf87b145405c9f5b13c552f33bce473a3c94a18c0069870478e14a9209b18bdb"
+  }
+}

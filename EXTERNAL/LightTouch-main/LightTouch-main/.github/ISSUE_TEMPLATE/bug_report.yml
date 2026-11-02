@@ -1,0 +1,48 @@
+name: Bug report
+description: Something doesn't work the way it should
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: LightTouch version
+      description: From Settings › About, or the release you downloaded (for example "v0.0.12").
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Android
+        - Linux
+        - Windows
+        - macOS
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Phone or computer, and its OS version
+      description: For example "Pixel 10, Android 16" or "Ryzen 7 3700X with an RTX 2080, Windows 11".
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Emulated device and iOS version
+      description: For example "iPod touch 2G, iOS 3.1.3".
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead. If LightTouch showed an error, paste its text.
+    validations:
+      required: true
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
+      description: Screenshots, or whether it happens every time. Please don't attach firmware, boot ROMs or personal data.

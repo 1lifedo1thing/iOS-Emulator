@@ -1,0 +1,155 @@
+{
+  "points": [
+    {
+      "pc": 858687880,
+      "name": "swap-end",
+      "role": "entry"
+    },
+    {
+      "pc": 858687936,
+      "name": "swap-end",
+      "role": "exit"
+    },
+    {
+      "pc": 858689080,
+      "name": "swap-wait",
+      "role": "entry"
+    },
+    {
+      "pc": 858689168,
+      "name": "swap-wait",
+      "role": "exit"
+    },
+    {
+      "pc": 858689280,
+      "name": "swap-begin",
+      "role": "entry"
+    },
+    {
+      "pc": 858689404,
+      "name": "swap-begin",
+      "role": "exit"
+    },
+    {
+      "pc": 858690476,
+      "name": "swap-set-layer",
+      "role": "entry"
+    },
+    {
+      "pc": 858691448,
+      "name": "swap-set-layer",
+      "role": "exit"
+    },
+    {
+      "pc": 866389000,
+      "name": "surface-unlock-nonnull",
+      "role": "entry"
+    },
+    {
+      "pc": 866389008,
+      "name": "surface-unlock-nonnull",
+      "role": "exit"
+    },
+    {
+      "pc": 858690576,
+      "name": "swap-set-layer",
+      "role": "surface-id"
+    },
+    {
+      "pc": 3221656108,
+      "name": "scheduled-thread",
+      "role": "switch"
+    },
+    {
+      "pc": 3221656260,
+      "name": "scheduled-thread",
+      "role": "switch"
+    },
+    {
+      "pc": 3221657844,
+      "name": "scheduled-thread",
+      "role": "switch"
+    },
+    {
+      "pc": 3221371565,
+      "name": "enqueue-request",
+      "role": "enqueue"
+    },
+    {
+      "pc": 834589132,
+      "name": "ca-native-swap",
+      "role": "entry"
+    },
+    {
+      "pc": 834589568,
+      "name": "ca-native-swap",
+      "role": "exit"
+    },
+    {
+      "pc": 834589416,
+      "name": "ca-native-swap",
+      "role": "surface-id"
+    },
+    {
+      "pc": 834589468,
+      "name": "ca-image-queue-insert",
+      "role": "entry"
+    },
+    {
+      "pc": 834589472,
+      "name": "ca-image-queue-insert",
+      "role": "exit"
+    },
+    {
+      "pc": 834590168,
+      "name": "ca-native-begin",
+      "role": "entry"
+    },
+    {
+      "pc": 834591788,
+      "name": "ca-native-begin",
+      "role": "exit"
+    },
+    {
+      "pc": 834516900,
+      "name": "ca-finish-update",
+      "role": "observation"
+    },
+    {
+      "pc": 834518568,
+      "name": "ca-finish-done",
+      "role": "observation"
+    },
+    {
+      "pc": 834517052,
+      "name": "ca-primary-flags",
+      "role": "observation"
+    },
+    {
+      "pc": 834517500,
+      "name": "ca-primary-absent",
+      "role": "observation"
+    },
+    {
+      "pc": 834520788,
+      "name": "ca-begin-update",
+      "role": "observation"
+    }
+  ],
+  "notes": [
+    "All API points ARM; enqueue Thumb. Return points are before epilogues; not proof of function return completion.",
+    "Unlock starts only on the nonnull path before loading the internal client pointer.",
+    "SetLayer/SwapSurface surface-id points follow CoreSurfaceBufferGetID and observe returned r0.",
+    "Entry and matching epilogue points selected from matching cache disassembly; no firmware modification.",
+    "SwapBegin successful epilogue r3 retains the token loaded at 0x332e8f54.",
+    "nativeWindow constructor stores native_window_swap at drawable+0x10 (0x31becec4); present callback verified from literal 0x304 at 0x31becfa8.",
+    "native swap entry r0 drawable; r1 flags. At surface-id point r0 is IOSurfaceGetID result. Submit boundary is before bl CAImageQueueInsertImage, next point observes returned r0.",
+    "native begin epilogue r0 is buffer pointer. All observations precede execution.",
+    "finish_update entry r0 display, r1 update. primary-flags r3 is display byte+0xcc, before loading primary descriptor into r5. primary-absent is reached only from the zero descriptor branch at 0x31bdb844.",
+    "finish-done is a void-function epilogue, not a success result. begin-update entry is a void function boundary."
+  ],
+  "symbol_sha256": {
+    "kernel": "8caf1738b15fe4df99ddebb1f976b8582364af27ef738b93dcac60be1b26c63e",
+    "dyld_cache": "bf87b145405c9f5b13c552f33bce473a3c94a18c0069870478e14a9209b18bdb"
+  }
+}

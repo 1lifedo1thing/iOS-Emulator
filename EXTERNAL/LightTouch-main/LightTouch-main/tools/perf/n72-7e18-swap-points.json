@@ -1,0 +1,115 @@
+{
+  "points": [
+    {
+      "pc": 858687880,
+      "name": "swap-end",
+      "role": "entry"
+    },
+    {
+      "pc": 858687936,
+      "name": "swap-end",
+      "role": "exit"
+    },
+    {
+      "pc": 858689080,
+      "name": "swap-wait",
+      "role": "entry"
+    },
+    {
+      "pc": 858689168,
+      "name": "swap-wait",
+      "role": "exit"
+    },
+    {
+      "pc": 858689180,
+      "name": "swap-signal",
+      "role": "entry"
+    },
+    {
+      "pc": 858689268,
+      "name": "swap-signal",
+      "role": "exit"
+    },
+    {
+      "pc": 858689280,
+      "name": "swap-begin",
+      "role": "entry"
+    },
+    {
+      "pc": 858689404,
+      "name": "swap-begin",
+      "role": "exit"
+    },
+    {
+      "pc": 858690356,
+      "name": "swap-surface",
+      "role": "entry"
+    },
+    {
+      "pc": 858690464,
+      "name": "swap-surface",
+      "role": "exit"
+    },
+    {
+      "pc": 858690476,
+      "name": "swap-set-layer",
+      "role": "entry"
+    },
+    {
+      "pc": 858691448,
+      "name": "swap-set-layer",
+      "role": "exit"
+    },
+    {
+      "pc": 866389000,
+      "name": "surface-unlock-nonnull",
+      "role": "entry"
+    },
+    {
+      "pc": 866389008,
+      "name": "surface-unlock-nonnull",
+      "role": "exit"
+    },
+    {
+      "pc": 858690408,
+      "name": "swap-surface",
+      "role": "surface-id"
+    },
+    {
+      "pc": 858690576,
+      "name": "swap-set-layer",
+      "role": "surface-id"
+    },
+    {
+      "pc": 3221656108,
+      "name": "scheduled-thread",
+      "role": "switch"
+    },
+    {
+      "pc": 3221656260,
+      "name": "scheduled-thread",
+      "role": "switch"
+    },
+    {
+      "pc": 3221657844,
+      "name": "scheduled-thread",
+      "role": "switch"
+    },
+    {
+      "pc": 3221371565,
+      "name": "enqueue-request",
+      "role": "enqueue"
+    }
+  ],
+  "notes": [
+    "All API points ARM; enqueue Thumb. Return points are before epilogues; not proof of function return completion.",
+    "Unlock starts only on the nonnull path before loading the internal client pointer.",
+    "SetLayer/SwapSurface surface-id points follow CoreSurfaceBufferGetID and observe returned r0.",
+    "Entry and matching epilogue points selected from matching cache disassembly; no firmware modification.",
+    "SwapBegin successful epilogue r3 retains the token loaded at 0x332e8f54."
+  ],
+  "symbol_sha256": {
+    "kernel": "8caf1738b15fe4df99ddebb1f976b8582364af27ef738b93dcac60be1b26c63e",
+    "dyld_cache": "bf87b145405c9f5b13c552f33bce473a3c94a18c0069870478e14a9209b18bdb"
+  }
+}

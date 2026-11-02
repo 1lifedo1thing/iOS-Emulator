@@ -1,0 +1,110 @@
+{
+  "schema": 1,
+  "status": "CROSS_LINKED_NOT_WINDOWS_QUALIFIED",
+  "daemon": {
+    "url": "https://github.com/samhenrigold/usbmuxd",
+    "revision": "5cb90897479b9021a69db9698fea071ef7b2eceb",
+    "license": "GPL-2.0-only OR GPL-3.0-only",
+    "license_files": [
+      "COPYING.GPLv2",
+      "COPYING.GPLv3"
+    ],
+    "preimage_sha256": {
+      "src/client.c": "46c042016b0c17f1f848fe75ce4f07c8c431debbfafcaf7b92e4bf2f80fef395",
+      "src/client.h": "10a4c0ad79cfe557c97983465115dd90d67999534077002ff2dc3b066d99c673",
+      "src/conf.c": "be11a6f972ee68d16f064c544bd5e43f3924aa8eb514b07ca928706487cdaf81",
+      "src/conf.h": "95e08b816afecb6cd634bd5937dc4e828a073d8b32231ea5f5f5d477baf87f55",
+      "src/device.c": "f2cb1964ea81fd3569c268f1de8f4a43bd3ec0f7b1ddb7304fa72ad59e9285b1",
+      "src/device.h": "06ddba5ea29c4b3f2552a780a2e2f976a5195adb24e96682ecb6e01694ccc7e6",
+      "src/log.c": "1e03dc2d32313afb162622038a276f4c99a5de689991e88b5bc75664914b166f",
+      "src/log.h": "6e646e3cef969caf4cecb4f9da931990e511892a170af82bf4e693f3eb8f3b8a",
+      "src/main.c": "4c63b6ddcd4e547fe46a21b7104745485dbaeecfe32a23e9b042ad8821d01ab0",
+      "src/preflight.c": "6387e2942a0bf0fd30891c512ba8faf2bc9a037f2b91f59c3ccad2abab974dec",
+      "src/preflight.h": "46a1571410de996598a4086b22fdcfede5b8e135ca0e403875cebe68682f7a7c",
+      "src/usb-qemu.c": "1a30ada3e3b4430761e9e8a0d70634fe3a6d1e70e090bcb2dcf249c49646db1f",
+      "src/usb.c": "ecbfca5e0bc2aeb189780863441654ba239b443928f0ffca686e0bfbe571fce0",
+      "src/usb.h": "d102fb84b8f6f2c924f1a25cd3180e39a872bce2df1693be6371c632e48c13ff",
+      "src/usbmuxd-proto.h": "2e43e3ebc85f81b254bef3d92bb4395df73280c893a88c496388e92f7db1988a",
+      "src/utils.c": "130bf3e08536848be538c6d8891e36ccc92aa02acc9a33bfd9225f9de606d53f",
+      "src/utils.h": "4ac4e6b8f6d26226c5055ee63164b7e29645829ef229fe869d4d03a26b78eacb"
+    },
+    "patch": "windows-host.patch",
+    "translation_units": [
+      "client.c",
+      "device.c",
+      "usb-qemu.c",
+      "utils.c",
+      "conf.c",
+      "preflight.c"
+    ],
+    "replace_main_with": "windows-main.c",
+    "additional_translation_units": [
+      "windows-peer.c"
+    ],
+    "link_libraries": [
+      "ws2_32",
+      "iphlpapi",
+      "advapi32",
+      "shell32",
+      "ole32",
+      "plist-2.0",
+      "imobiledevice-glue-1.0"
+    ]
+  },
+  "libusbmuxd": {
+    "url": "https://github.com/libimobiledevice/libusbmuxd/releases/download/2.1.1/libusbmuxd-2.1.1.tar.bz2",
+    "version": "2.1.1",
+    "archive_sha256": "5546f1aba1c3d1812c2b47d976312d00547d1044b84b6a461323c621f396efce",
+    "license": "LGPL-2.1-or-later",
+    "preimage_sha256": {
+      "src/libusbmuxd.c": "c1954384c81fed026afc91439a3c7e706026161bc44bdcffe7b37518ddb07911"
+    },
+    "patch": "libusbmuxd-owned.patch",
+    "additional_translation_units": [
+      "windows-connect.c",
+      "windows-peer.c"
+    ],
+    "additional_link_libraries": [
+      "ws2_32",
+      "iphlpapi",
+      "advapi32"
+    ]
+  },
+  "adaptation_reference": {
+    "url": "https://github.com/BerryPVZ/LightTouchWin",
+    "revision": "7aecedc273f66d3a4aeeb27fee750629c6fffc3c",
+    "license": "GPL-2.0-only",
+    "files_sha256": {
+      "Windows/usbmux/windows-main.c": "c71075709223008385f9648b5e92de61b35b95d1409659d47b1fd0bf16257cad",
+      "Windows/usbmux/windows-compat.h": "55525c7bf8fdec1a6752a17bd8d91144475747937f71d05d96f2e6cc18e9e06c",
+      "Windows/usbmux/windows-host.patch": "d1bdaeb9eccde17b56fdfd1855f90ec675d74ee44ccd1189f9a58d3b4561f515",
+      "LICENSE": "6f04ae8364d0079a192b14635f4b1da294ce18724c034c39a6a41d1b09df6100"
+    },
+    "changes": "Preserve the native protocol implementation; replace abrupt parent watcher, validate ownership before bytes and fail closed without system fallback."
+  },
+  "public_dependency_manifest": "../../build-support/dependencies.json",
+  "required_mobile_packages": [
+    "libplist",
+    "libimobiledevice-glue",
+    "libusbmuxd",
+    "libtatsu",
+    "libimobiledevice",
+    "openssl"
+  ],
+  "qualification": {
+    "peer_connector_objects_compiled": true,
+    "object_source_revision": "b36e542ef6c8c7d90de15afdb59e61d93f3bfef5",
+    "daemon_compiled": true,
+    "daemon_linked": true,
+    "daemon_link_source_revision": "748b53f075b46090b3fbd9765896935d40394d87",
+    "transport_linked": true,
+    "transport_link_source_revision": "9507550176d93e092b8826798050ead8ad6fe574",
+    "owned_connector_exports_verified": 21,
+    "transport_runtime_pe_images_verified": 5,
+    "native_stack_linked": false,
+    "windows_executed": false,
+    "shared_apps_enabled": false,
+    "daemon_objects_compiled": true,
+    "daemon_object_source_revision": "95795f20a85db777279ebd20852df88052e3daad"
+  }
+}

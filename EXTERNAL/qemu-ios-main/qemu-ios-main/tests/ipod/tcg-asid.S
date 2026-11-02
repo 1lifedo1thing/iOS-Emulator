@@ -1,0 +1,422 @@
+@ ASID, TLB and jump-cache checks for tests/ipod/tcg-asid-test.sh: a bare-metal program run as the bootrom (at 0, SVC
+@ mode, MMU off) on an ARMv6 or ARMv7 board whose RAM starts at RAM (-DRAM=). It maps a few test pages at 0x70000000
+@ in two L1 tables (odd ASIDs use T1, even ones T2) beside identity sections for itself and the RAM, and does what a
+@ kernel does to them: switch ASID, remap, invalidate, rewrite code. One character per check on the semihosting
+@ console: its letter in lowercase if it passed, uppercase if not; then 'E', and it exits. An exception hangs it.
+        .syntax unified
+        .arm
+        .text
+        .equ T1, RAM + 0x20000          @ L1 table of the odd ASIDs
+        .equ T2, RAM + 0x24000          @ L1 table of the even ASIDs
+        .equ L2A, RAM + 0x28000         @ T1's L2 table for VA 0x70000000-0x700fffff
+        .equ L2B, RAM + 0x28400         @ T2's
+        .equ PA_A, RAM + 0x30000        @ data 0xa1, VA_D in T1 (nG)
+        .equ PA_B, RAM + 0x31000        @ data 0xb2, VA_D in T2 (nG)
+        .equ PA_C1, RAM + 0x32000       @ code: return 1, VA_C in T1 (nG)
+        .equ PA_C2, RAM + 0x33000       @ code: return 2, VA_C in T2 (nG)
+        .equ PA_C3, RAM + 0x34000       @ code: return 3
+        .equ PA_G1, RAM + 0x35000       @ data 0xc3, VA_G in both (global)
+        .equ PA_G2, RAM + 0x36000       @ data 0xd4
+        .equ VA_D, 0x70000000
+        .equ VA_C, 0x70001000
+        .equ VA_G, 0x70002000
+        .equ VA_N, 0x70010000     @ 40 nG pages: word i in T1, 0x100 + i in T2
+        .equ NPAGES, 40
+        .equ PA_N1, RAM + 0x100000      @ the 40 pages in T1
+        .equ PA_N2, RAM + 0x200000      @ in T2
+        .equ PG_NG, 0x872         @ small page: nG, AP=11, TEX=001 (normal), type 2
+        .equ PG_G, 0x072          @ the same, global
+        .equ SECT, 0x1c02         @ section: AP=11, TEX=001, domain 0, global
+
+_start:
+        cpsid   aif
+        ldr     sp, =RAM + 0xf000
+        mov     r10, #0
+        @ L1 tables: zero, then identity sections and the L2 tables at VA_D
+        ldr     r0, =T1
+        mov     r1, #0
+        ldr     r2, =0x8000                 @ T1 and T2
+2:      str     r1, [r0], #4
+        subs    r2, r2, #4
+        bne     2b
+        ldr     r0, =T1
+        bl      .Lsections
+        ldr     r0, =T2
+        bl      .Lsections
+        ldr     r0, =T1 + (VA_D >> 20) * 4
+        ldr     r1, =L2A | 1
+        str     r1, [r0]
+        ldr     r0, =T2 + (VA_D >> 20) * 4
+        ldr     r1, =L2B | 1
+        str     r1, [r0]
+        @ L2 tables
+        ldr     r0, =L2A
+        mov     r1, #0
+        mov     r2, #0x800
+3:      str     r1, [r0], #4
+        subs    r2, r2, #4
+        bne     3b
+        ldr     r0, =L2A
+        ldr     r1, =PA_A | PG_NG
+        str     r1, [r0, #0]
+        ldr     r1, =PA_C1 | PG_NG
+        str     r1, [r0, #4]
+        ldr     r1, =PA_G1 | PG_G
+        str     r1, [r0, #8]
+        ldr     r0, =L2B
+        ldr     r1, =PA_B | PG_NG
+        str     r1, [r0, #0]
+        ldr     r1, =PA_C2 | PG_NG
+        str     r1, [r0, #4]
+        ldr     r1, =PA_G1 | PG_G
+        str     r1, [r0, #8]
+        mov     r3, #0
+4:      ldr     r0, =L2A + 0x10 * 4
+        ldr     r1, =PA_N1 | PG_NG
+        add     r1, r1, r3, lsl #12
+        str     r1, [r0, r3, lsl #2]
+        ldr     r2, =PA_N1
+        str     r3, [r2, r3, lsl #12]       @ word i at its T1 page
+        ldr     r0, =L2B + 0x10 * 4
+        ldr     r1, =PA_N2 | PG_NG
+        add     r1, r1, r3, lsl #12
+        str     r1, [r0, r3, lsl #2]
+        ldr     r2, =PA_N2
+        add     r1, r3, #0x100
+        str     r1, [r2, r3, lsl #12]       @ word 0x100 + i at its T2 page
+        add     r3, r3, #1
+        cmp     r3, #NPAGES
+        bne     4b
+        @ data and code pages
+        ldr     r0, =PA_A
+        mov     r1, #0xa1
+        str     r1, [r0]
+        ldr     r0, =PA_B
+        mov     r1, #0xb2
+        str     r1, [r0]
+        ldr     r0, =PA_G1
+        mov     r1, #0xc3
+        str     r1, [r0]
+        ldr     r0, =PA_G2
+        mov     r1, #0xd4
+        str     r1, [r0]
+        ldr     r0, =PA_C1
+        mov     r1, #1
+        bl      .Lputcode
+        ldr     r0, =PA_C2
+        mov     r1, #2
+        bl      .Lputcode
+        ldr     r0, =PA_C3
+        mov     r1, #3
+        bl      .Lputcode
+        @ MMU on: domain 0 client, TTBCR 0, ASID 1 on T1
+        mov     r0, #1
+        mcr     p15, 0, r0, c3, c0, 0       @ DACR
+        mov     r0, #0
+        mcr     p15, 0, r0, c2, c0, 2       @ TTBCR
+        mov     r0, #1
+        bl      .Lswitch
+        mcr     p15, 0, r0, c8, c7, 0       @ TLBIALL
+        mrc     p15, 0, r0, c1, c0, 0
+        orr     r0, r0, #1                  @ M
+        orr     r0, r0, #0x800000           @ XP (v6; RES1 on v7)
+        bic     r0, r0, #0x30000000         @ no TRE/AFE
+        mcr     p15, 0, r0, c1, c0, 0
+        mcr     p15, 0, r0, c7, c5, 4       @ ISB
+
+        @ a-c: a kernel load from a non-global page follows the ASID switch
+        ldr     r0, =VA_D
+        ldr     r0, [r0]
+        mov     r1, #0xa1
+        mov     r2, #'a'
+        bl      .Lcheck
+        mov     r0, #2
+        bl      .Lswitch
+        ldr     r0, =VA_D
+        ldr     r0, [r0]
+        mov     r1, #0xb2
+        mov     r2, #'b'
+        bl      .Lcheck
+        mov     r0, #1
+        bl      .Lswitch
+        ldr     r0, =VA_D
+        ldr     r0, [r0]
+        mov     r1, #0xa1
+        mov     r2, #'c'
+        bl      .Lcheck
+        @ d-e: more non-global kernel pages than are tracked one by one
+        mov     r2, #0
+        bl      .Lreadpages                 @ ASID 1: fills them
+        mov     r0, #2
+        bl      .Lswitch
+        mov     r1, #0x100
+        mov     r2, #'d'
+        bl      .Lreadpages
+        mov     r0, #1
+        bl      .Lswitch
+        mov     r1, #0
+        mov     r2, #'e'
+        bl      .Lreadpages
+        @ f-h: code at one VA in two address spaces, reached by an indirect branch
+        bl      .Lcallc
+        mov     r1, #1
+        mov     r2, #'f'
+        bl      .Lcheck
+        mov     r0, #2
+        bl      .Lswitch
+        bl      .Lcallc
+        mov     r1, #2
+        mov     r2, #'g'
+        bl      .Lcheck
+        mov     r0, #1
+        bl      .Lswitch
+        bl      .Lcallc
+        mov     r1, #1
+        mov     r2, #'h'
+        bl      .Lcheck
+        @ i: ASID 1's code page remapped while ASID 2 runs, invalidated by MVA and ASID
+        mov     r0, #2
+        bl      .Lswitch
+        bl      .Lcallc
+        ldr     r0, =L2A
+        ldr     r1, =PA_C3 | PG_NG
+        str     r1, [r0, #4]
+        ldr     r0, =VA_C | 1
+        mcr     p15, 0, r0, c8, c7, 1       @ TLBIMVA
+        mov     r0, #1
+        bl      .Lswitch
+        bl      .Lcallc
+        mov     r1, #3
+        mov     r2, #'i'
+        bl      .Lcheck
+        @ j: remapped again while ASID 2 runs, invalidated by ASID
+        mov     r0, #2
+        bl      .Lswitch
+        bl      .Lcallc
+        ldr     r0, =L2A
+        ldr     r1, =PA_C1 | PG_NG
+        str     r1, [r0, #4]
+        mov     r0, #1
+        mcr     p15, 0, r0, c8, c7, 2       @ TLBIASID 1
+        mov     r0, #1
+        bl      .Lswitch
+        bl      .Lcallc
+        mov     r1, #1
+        mov     r2, #'j'
+        bl      .Lcheck
+        @ k: the current ASID's code remapped and invalidated by ASID; l: back, by MVA
+        ldr     r0, =L2A
+        ldr     r1, =PA_C3 | PG_NG
+        str     r1, [r0, #4]
+        mov     r0, #1
+        mcr     p15, 0, r0, c8, c7, 2       @ TLBIASID 1
+        bl      .Lcallc
+        mov     r1, #3
+        mov     r2, #'k'
+        bl      .Lcheck
+        ldr     r0, =L2A
+        ldr     r1, =PA_C1 | PG_NG
+        str     r1, [r0, #4]
+        ldr     r0, =VA_C | 1
+        mcr     p15, 0, r0, c8, c7, 1       @ TLBIMVA
+        bl      .Lcallc
+        mov     r1, #1
+        mov     r2, #'l'
+        bl      .Lcheck
+        @ m: more address spaces than jump caches (17 for 16), twice round: odd ASIDs return 1, even 2
+        mov     r9, #0                      @ mismatches
+        mov     r8, #34
+        mov     r7, #1                      @ ASID
+5:      mov     r0, r7
+        bl      .Lswitch
+        bl      .Lcallc
+        and     r1, r7, #1
+        rsb     r1, r1, #2
+        cmp     r0, r1
+        addne   r9, r9, #1
+        add     r7, r7, #1
+        cmp     r7, #18
+        moveq   r7, #1
+        subs    r8, r8, #1
+        bne     5b
+        mov     r0, r9
+        mov     r1, #0
+        mov     r2, #'m'
+        bl      .Lcheck
+        @ n-q: a global kernel mapping kept across switches, then remapped
+        mov     r0, #1
+        bl      .Lswitch
+        ldr     r0, =VA_G
+        ldr     r0, [r0]
+        mov     r1, #0xc3
+        mov     r2, #'n'
+        bl      .Lcheck
+        mov     r0, #2
+        bl      .Lswitch
+        ldr     r0, =VA_G
+        ldr     r0, [r0]                    @ the global entry, if kept
+        ldr     r0, =L2A
+        ldr     r1, =PA_G2 | PG_G
+        str     r1, [r0, #8]
+        ldr     r0, =L2B
+        str     r1, [r0, #8]
+        ldr     r0, =VA_G | 2
+        mcr     p15, 0, r0, c8, c7, 1       @ TLBIMVA (a global entry goes whatever the ASID)
+        ldr     r0, =VA_G
+        ldr     r0, [r0]
+        mov     r1, #0xd4
+        mov     r2, #'o'
+        bl      .Lcheck
+        mov     r0, #1
+        bl      .Lswitch
+        ldr     r0, =VA_G
+        ldr     r0, [r0]
+        mov     r1, #0xd4
+        mov     r2, #'p'
+        bl      .Lcheck
+        ldr     r0, =L2A
+        ldr     r1, =PA_G1 | PG_G
+        str     r1, [r0, #8]
+        ldr     r0, =L2B
+        str     r1, [r0, #8]
+        mcr     p15, 0, r0, c8, c7, 0       @ TLBIALL
+        ldr     r0, =VA_G
+        ldr     r0, [r0]
+        mov     r1, #0xc3
+        mov     r2, #'q'
+        bl      .Lcheck
+        @ r-t: code rewritten (a JIT): through another mapping while another ASID runs, through
+        @ another mapping, and through its own
+        bl      .Lcallc
+        mov     r0, #2
+        bl      .Lswitch
+        bl      .Lcallc
+        ldr     r0, =PA_C1
+        mov     r1, #4
+        bl      .Lputcode
+        mov     r0, #1
+        bl      .Lswitch
+        bl      .Lcallc
+        mov     r1, #4
+        mov     r2, #'r'
+        bl      .Lcheck
+        ldr     r0, =PA_C1
+        mov     r1, #5
+        bl      .Lputcode
+        bl      .Lcallc
+        mov     r1, #5
+        mov     r2, #'s'
+        bl      .Lcheck
+        ldr     r0, =VA_C
+        mov     r1, #6
+        bl      .Lputcode
+        bl      .Lcallc
+        mov     r1, #6
+        mov     r2, #'t'
+        bl      .Lcheck
+        @ u: ASID 1's code remapped while ASID 2 runs, then everything invalidated
+        mov     r0, #2
+        bl      .Lswitch
+        bl      .Lcallc
+        ldr     r0, =L2A
+        ldr     r1, =PA_C3 | PG_NG
+        str     r1, [r0, #4]
+        mcr     p15, 0, r0, c8, c7, 0       @ TLBIALL
+        mov     r0, #1
+        bl      .Lswitch
+        bl      .Lcallc
+        mov     r1, #3
+        mov     r2, #'u'
+        bl      .Lcheck
+
+        mov     r0, #'E'
+        bl      .Lputc
+        mov     r0, #'\n'
+        bl      .Lputc
+        mov     r0, #0x18                   @ SYS_EXIT
+        ldr     r1, =0x20026                @ ADP_Stopped_ApplicationExit
+        svc     0x123456
+        b       .
+
+@ r0 = L1 table: identity sections for the ROM at 0 (this code) and 64M of RAM
+.Lsections:
+        ldr     r1, =SECT
+        str     r1, [r0]
+        ldr     r1, =RAM | SECT
+        add     r0, r0, #(RAM >> 20) * 4
+        mov     r2, #64
+1:      str     r1, [r0], #4
+        add     r1, r1, #0x100000
+        subs    r2, r2, #1
+        bne     1b
+        bx      lr
+
+@ r0 = ASID: TTBR0 = T1 (odd) or T2 (even), then CONTEXTIDR
+.Lswitch:
+        tst     r0, #1
+        ldrne   r1, =T1
+        ldreq   r1, =T2
+        mcr     p15, 0, r1, c2, c0, 0       @ TTBR0
+        mcr     p15, 0, r0, c13, c0, 1      @ CONTEXTIDR
+        mcr     p15, 0, r0, c7, c5, 4       @ ISB
+        bx      lr
+
+@ call the code at VA_C three times (an indirect branch each), result in r0
+.Lcallc:
+        push    {r4, r5, lr}
+        mov     r5, #3
+1:      ldr     r4, =VA_C
+        blx     r4
+        subs    r5, r5, #1
+        bne     1b
+        pop     {r4, r5, pc}
+
+@ r0 = address: "mov r0, #r1; bx lr" there, then make it visible to instruction fetch
+.Lputcode:
+        orr     r1, r1, #0xe3000000
+        orr     r1, r1, #0x00a00000
+        str     r1, [r0]
+        ldr     r1, =0xe12fff1e
+        str     r1, [r0, #4]
+        mov     r1, #0
+        mcr     p15, 0, r1, c7, c10, 4      @ DSB
+        mcr     p15, 0, r1, c7, c5, 0       @ ICIALLU
+        mcr     p15, 0, r1, c7, c5, 6       @ BPIALL
+        mcr     p15, 0, r1, c7, c5, 4       @ ISB
+        bx      lr
+
+@ read the NPAGES non-global pages; with r2 != 0, check page i holds r1 + i (one character, r2)
+.Lreadpages:
+        push    {r4, r5, r6, lr}
+        mov     r4, #0
+        mov     r6, #0                      @ mismatches
+        ldr     r5, =VA_N
+1:      ldr     r0, [r5, r4, lsl #12]
+        add     r3, r1, r4
+        cmp     r0, r3
+        addne   r6, r6, #1
+        add     r4, r4, #1
+        cmp     r4, #NPAGES
+        bne     1b
+        cmp     r2, #0
+        popeq   {r4, r5, r6, pc}
+        mov     r0, r6
+        mov     r1, #0
+        bl      .Lcheck
+        pop     {r4, r5, r6, pc}
+
+@ r0 = got, r1 = expected, r2 = the check's letter
+.Lcheck:
+        cmp     r0, r1
+        subne   r2, r2, #0x20
+        addne   r10, r10, #1
+        mov     r0, r2
+@ r0 = character, to the semihosting console (SYS_WRITEC)
+.Lputc:
+        push    {r0, r1, r2, r3, r12, lr}
+        mov     r1, sp
+        mov     r0, #3
+        svc     0x123456
+        pop     {r0, r1, r2, r3, r12, pc}
+
+        .ltorg

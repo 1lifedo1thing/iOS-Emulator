@@ -1,0 +1,2 @@
+# Preserve third-party source archives byte-for-byte, including upstream CRLF.
+vendor/* -whitespace
