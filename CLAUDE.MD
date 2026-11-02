@@ -68,9 +68,18 @@ iOS-Emulator --run <device> --snapshot booted --seconds 20 --tap 0.5,0.9,2 --sho
 
 A `--snapshot` run works on a throwaway copy of the snapshot's disk in `%TEMP%` (the device is never touched, so every run starts identical), counts `t` from the restore, and ends by quitting at once (exit 0 without an iOS shutdown). Touch and the guest agent work at once; USB services (`info`, `files.*`) take up to about 40 s to reconnect.
 
+**The window is tested through screenshots** (environment variables, documented above `EnvText` in `ui.cpp`): `IOS_EMULATOR_UI_SHOT=<file.png>` saves the window after `IOS_EMULATOR_UI_SHOT_AFTER` seconds (default 5) and closes the app. `IOS_EMULATOR_UI_PAGE=add` opens the device grid, `IOS_EMULATOR_UI_PRODUCT=iPhone3,1` a device's version wheel, and `IOS_EMULATOR_UI_START=1` starts the selected device (with `IOS_EMULATOR_UI_LANDSCAPE=1`, `IOS_EMULATOR_UI_DEVTOOLS=1`, `IOS_EMULATOR_UI_FULLSCREEN=1`). Run it with `Start-Process -Wait`. A cold-booted device's display is usually off by the time it's up, and the window can't be clicked from a script, so check what iOS shows with `--run` instead.
+
 ## Architecture
 
 One executable, several modes (`wWinMain` in `src/main.cpp`): no arguments opens the ImGui window (`ui.cpp`), `--list/--run/--catalog/--prepare/--import` are console modes, and `--worker` runs a single device.
+
+The window has a sidebar of devices, which the user wants left as it is, and pages:
+- **A device:** its picture with working buttons, an icon toolbar under it, and the developer tools behind a tab at its right edge (hidden by default, `Settings::devTools`).
+- **Add Device:** a grid of products, then a drum wheel of versions (`DrumPicker`).
+- **Settings.**
+
+The toolbar icons are Segoe MDL2 Assets glyphs merged into the UI font (`icon::` in `ui.cpp`). Without that font the buttons fall back to text.
 
 **Why there is a worker process:** the engine (`resources/libqemu-arm.dll`, qemu-ios with a C API declared in `third_party/qemu-ios/*.h`) can start only once per process and can't be unloaded. So each running device is its own `iOS-Emulator.exe --worker` process. `Engine` in `engine.h` resolves the `qemu_ios_*` functions by name. To use a new engine function, add it there.
 
@@ -82,6 +91,21 @@ One executable, several modes (`wWinMain` in `src/main.cpp`): no arguments opens
 - Commands go to the worker's stdin and events come back on an inherited pipe, one JSON object per line. The full protocol is in the comment at the top of `src/worker.h`. Keep that comment in sync when you add a command or event.
 - Screen frames go through a named file mapping (`SharedFrame` in `common.h`, BGRA pixels, with a seqlock `sequence`).
 - Developer requests carry an `id`. `Session::Request` calls the reply callback from `Update()` on the caller's thread.
+
+The worker answers only commands that carry an `id`. Input sent before iOS is up (touch, buttons) is dropped silently, since the UI sends it without waiting.
+
+**Device pictures (`skin.cpp`, `resources/skins/*.svg`):** each board is drawn from an SVG front view in tenths of a millimetre (`SkinFile` maps boards to files; the iPod touch 3G reuses the 2G's). It's rasterized with nanosvg (`third_party/nanosvg`) at the size it's shown, in three layers: body, buttons and glare. The app reads only these element ids (matched up to the first `.`, and a group passes its id to its shapes):
+- `body`, `screen` (exactly the panel);
+- `home`, `power`, `volume-up`, `volume-down`;
+- `glare`.
+
+Side buttons are drawn under the body and sink into it when pressed. nanosvg ends a comment at the first `>`, so SVG comments must not contain one. Its other limits: no filters, masks, clip paths, text or `<use>`.
+
+**Landscape** turns the picture a quarter turn anticlockwise (Home on the right). `ToPanel` (`skin.h`) maps shown screen points to the panel's own scan, together with the iPad's already `turned` panel. It drives both the frame's texture corners and touches. iOS is told through the accelerometer (`Motion` in `ui.cpp`):
+- landscape stands the device on its side, `x = +g` (checked: Safari on 3.1.3 lays out the right way up);
+- portrait lies flat, after one second upright so iOS turns back.
+
+The engine drops a motion sample after 250 ms, so the worker repeats the last one every 100 ms (`PublishThread`).
 
 **Typing (`Worker::TypeText`, `worker.cpp`)** goes through `it_typein` (`resources/guest-tools/it_typein.dylib`, one fat armv6 + armv7 build for iOS 3 to 7), a library loaded into every app and SpringBoard. The guest agent routes its `type` (UTF-8 text, inserted into the focused field; `\n` is Return), `backspace` and `uidump` ops to it in the app in front, which answers from its main run loop. Queued text goes out in one request, so fast typing doesn't fall behind. A failure becomes a `typing` event (`InputError` maps the statuses: locked, no focused field, -138 when no `it_typein` answers). firmwarekit installs it (`system_edits::install_typein`), and the loader (`TypeinLoader`) depends on the iOS version: a Substrate extension filtered to UIKit on jailbroken 3.x to 6.x (no `DYLD_` variable for Cydia's cydo to refuse); SpringBoard's `DYLD_INSERT_LIBRARIES` on 2.x and 3.x, whose apps inherit SpringBoard's environment; on 4.x and later SpringBoard's job plus the boot job `com.qemu.it-typein`, which runs `launchctl setenv DYLD_INSERT_LIBRARIES` so launchd hands it to every app. `/etc/launchd.conf` doesn't work: 7.x's launchd ignores it, and a variable set for every process from boot on hangs 3.1.3. The guest package's seed (`guest_package::seed`) makes the guest tools' build the package's hook of `/usr/lib/it_typein.dylib`, since `it_boot` keeps the package's hooks in place (2.x keeps the itpack's old build). Devices prepared before this don't have it and must be prepared again. Tested on the iPod touch 2G (3.1.3), iPhone 3GS (6.1.3, plain and jailbroken) and iPhone 4 (7.1.2).
 

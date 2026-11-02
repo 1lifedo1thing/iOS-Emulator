@@ -88,6 +88,7 @@
     <ClCompile Include="src\proxy.cpp" />
     <ClCompile Include="src\services.cpp" />
     <ClCompile Include="src\session.cpp" />
+    <ClCompile Include="src\skin.cpp" />
     <ClCompile Include="src\snapshot.cpp" />
     <ClCompile Include="src\ui.cpp" />
     <ClCompile Include="src\worker.cpp" />
@@ -107,6 +108,7 @@
     <ClInclude Include="src\proxy.h" />
     <ClInclude Include="src\services.h" />
     <ClInclude Include="src\session.h" />
+    <ClInclude Include="src\skin.h" />
     <ClInclude Include="src\snapshot.h" />
     <ClInclude Include="src\ui.h" />
     <ClInclude Include="src\worker.h" />

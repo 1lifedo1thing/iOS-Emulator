@@ -150,6 +150,7 @@ private:
     void TypeText(const std::string &text);
     void PublishFrame();
     void SendStatusIfChanged();
+    void SendMotion();   // motion_ to the engine, with motionMutex_ held
     void Shutdown();
     void StartWebProxy(BootOptions &options);
     void UpdateWebProxy();
@@ -182,7 +183,13 @@ private:
     std::string lastStatus_;
 
     uint64_t touchId_ = 0;                   // every touch batch gets a new, increasing id
-    uint64_t motionTime_ = 0;
+
+    // The engine forgets an accelerometer sample after 250 ms, so the last one is sent again every
+    // 100 ms: a device turned to landscape stays turned while nothing new comes from the UI.
+    std::mutex motionMutex_;
+    bool motionHeld_ = false;                // a sample was sent, so keep repeating it
+    double motion_[3] = {0, 0, 9.80665};     // that sample, m/s^2 in the guest's portrait axes
+    uint64_t motionTime_ = 0;                // its timestamp (must strictly increase)
 
     std::mutex agentMutex_;                  // the guest agent answers one request at a time
     uint64_t agentSequence_ = 0;
@@ -307,6 +314,7 @@ void Worker::GuestThread(std::vector<std::string> args) {
 }
 
 void Worker::PublishThread() {
+    auto motionSent = std::chrono::steady_clock::now();
     while (!done_) {
         {
             std::unique_lock<std::mutex> lock(frameMutex_);
@@ -317,7 +325,25 @@ void Worker::PublishThread() {
             continue;
         PublishFrame();
         SendStatusIfChanged();
+        if (std::chrono::steady_clock::now() - motionSent >= 100ms) {   // keep the last motion sample alive
+            motionSent = std::chrono::steady_clock::now();
+            std::lock_guard<std::mutex> lock(motionMutex_);
+            if (motionHeld_)
+                SendMotion();
+        }
     }
+}
+
+void Worker::SendMotion() {
+    QemuIosPortableMotion motion{};
+    motion.size = sizeof motion;
+    motion.version = 1;
+    motionTime_ = std::max(motionTime_ + 1, NowNs());   // must strictly increase
+    motion.timestamp_ns = motionTime_;
+    motion.fields = QEMU_IOS_MOTION_ACCEL;
+    for (int i = 0; i < 3; i++)
+        motion.acceleration[i] = motion_[i];
+    engine_->motion(&motion);
 }
 
 void Worker::PublishFrame() {
@@ -480,17 +506,14 @@ void Worker::HandleCommand(const Json &command) {
         Touch(contacts);
     } else if (cmd == "button" && ready) {
         engine_->button(command.at("button").get<int>(), command.at("down").get<bool>());
-    } else if (cmd == "motion" && ready) {
-        QemuIosPortableMotion motion{};
-        motion.size = sizeof motion;
-        motion.version = 1;
-        motionTime_ = std::max(motionTime_ + 1, NowNs());   // must strictly increase
-        motion.timestamp_ns = motionTime_;
-        motion.fields = QEMU_IOS_MOTION_ACCEL;
-        motion.acceleration[0] = command.value("x", 0.0);
-        motion.acceleration[1] = command.value("y", 0.0);
-        motion.acceleration[2] = command.value("z", 9.80665);
-        engine_->motion(&motion);
+    } else if (cmd == "motion") {   // kept even before iOS is up: PublishThread sends it once the engine runs
+        std::lock_guard<std::mutex> lock(motionMutex_);
+        motion_[0] = command.value("x", 0.0);
+        motion_[1] = command.value("y", 0.0);
+        motion_[2] = command.value("z", 9.80665);
+        motionHeld_ = true;
+        if (ready)
+            SendMotion();
     } else if (cmd == "pause" && ready) {
         command.value("paused", false) ? engine_->pause() : engine_->resume();
     } else if (cmd == "mute") {
@@ -510,8 +533,10 @@ void Worker::HandleCommand(const Json &command) {
         typingReady_.notify_one();
     } else if (ready && command.contains("id")) {
         HandleDeveloperCommand(command);
-    } else {
+    } else if (command.contains("id")) {   // a request gets an answer; input before iOS is up is dropped
         Reply(command, false, nullptr, ready ? "Unknown command " + cmd : "The device isn't running yet");
+    } else if (ready) {
+        Log("Unknown command %s", cmd.c_str());
     }
 }
 

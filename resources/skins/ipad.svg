@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- iPad (1st generation): front view, in tenths of a millimetre (189.7 x 242.8 mm body).
+     Device art for iOS Emulator (src/skin.h). Element ids it reads, matched up to the first ".":
+       body          the outline of the device (pressed side buttons sink into it)
+       screen        exactly the panel; the running device's picture covers it
+       home, power, volume-up, volume-down   the buttons that work (only those this device has)
+       glare         a faint reflection drawn over the picture
+     Everything else is decoration. Drawn with nanosvg: no filters, masks, clip paths, text or <use>. -->
+
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 2117 2648" width="2117" height="2648">
+<defs>
+<linearGradient id="rim" gradientUnits="userSpaceOnUse" x1="110" y1="110" x2="2007" y2="2538"><stop offset="0" stop-color="#9fa1a5"/><stop offset="0.18" stop-color="#dcdde0"/><stop offset="0.36" stop-color="#bfc1c5"/><stop offset="0.55" stop-color="#eceef0"/><stop offset="0.75" stop-color="#b4b6ba"/><stop offset="1" stop-color="#d2d4d7"/></linearGradient>
+<linearGradient id="btn-h" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#1c1c1e"/><stop offset="0.45" stop-color="#3a3a3d"/><stop offset="0.55" stop-color="#2e2e31"/><stop offset="1" stop-color="#151517"/></linearGradient>
+<linearGradient id="btn-v" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1c1c1e"/><stop offset="0.45" stop-color="#3a3a3d"/><stop offset="0.55" stop-color="#2e2e31"/><stop offset="1" stop-color="#151517"/></linearGradient>
+<linearGradient id="glass" x1="0" y1="0" x2="0.35" y2="1"><stop offset="0" stop-color="#1d1e21"/><stop offset="0.5" stop-color="#101113"/><stop offset="1" stop-color="#08080a"/></linearGradient>
+<linearGradient id="panel" x1="0" y1="0" x2="0.4" y2="1"><stop offset="0" stop-color="#0d0e11"/><stop offset="1" stop-color="#040405"/></linearGradient>
+<radialGradient id="home-dish" cx="0.5" cy="0.42" r="0.6"><stop offset="0" stop-color="#0b0b0c"/><stop offset="0.75" stop-color="#151517"/><stop offset="1" stop-color="#26262a"/></radialGradient>
+<radialGradient id="lens" cx="0.4" cy="0.4" r="0.6"><stop offset="0" stop-color="#28324a"/><stop offset="0.5" stop-color="#0c0f18"/><stop offset="1" stop-color="#030304"/></radialGradient>
+<linearGradient id="grille" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#050506"/><stop offset="1" stop-color="#2a2b2f"/></linearGradient>
+<linearGradient id="sheen" x1="0" y1="0" x2="0.9" y2="0.55"><stop offset="0" stop-color="#ffffff" stop-opacity="0.09"/><stop offset="0.45" stop-color="#ffffff" stop-opacity="0.025"/><stop offset="0.46" stop-color="#ffffff" stop-opacity="0"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></linearGradient>
+<linearGradient id="shine" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></linearGradient>
+</defs>
+<g id="shadow">
+<rect x="33" y="47" width="2051" height="2582" rx="227" ry="227" fill="#000000" fill-opacity="0.045"/>
+<rect x="44" y="58" width="2029" height="2560" rx="216" ry="216" fill="#000000" fill-opacity="0.045"/>
+<rect x="55" y="69" width="2007" height="2538" rx="205" ry="205" fill="#000000" fill-opacity="0.045"/>
+<rect x="66" y="80" width="1985" height="2516" rx="194" ry="194" fill="#000000" fill-opacity="0.045"/>
+<rect x="77" y="91" width="1963" height="2494" rx="183" ry="183" fill="#000000" fill-opacity="0.045"/>
+<rect x="88" y="102" width="1941" height="2472" rx="172" ry="172" fill="#000000" fill-opacity="0.045"/>
+<rect x="99" y="113" width="1919" height="2450" rx="161" ry="161" fill="#000000" fill-opacity="0.045"/>
+</g>
+<g id="power"><rect x="1650" y="94" width="160" height="46" rx="9" ry="9" fill="url(#btn-v)" stroke="#000000" stroke-opacity="0.35" stroke-width="1.5"/><rect x="1659" y="96" width="142" height="3" rx="1.5" ry="1.5" fill="#ffffff" fill-opacity="0.35"/></g>
+<g id="volume-up"><rect x="1977" y="540" width="46" height="106" rx="9" ry="9" fill="url(#btn-h)" stroke="#000000" stroke-opacity="0.35" stroke-width="1.5"/><rect x="2018" y="549" width="3" height="88" rx="1.5" ry="1.5" fill="#ffffff" fill-opacity="0.35"/></g>
+<g id="volume-down"><rect x="1977" y="650" width="46" height="106" rx="9" ry="9" fill="url(#btn-h)" stroke="#000000" stroke-opacity="0.35" stroke-width="1.5"/><rect x="2018" y="659" width="3" height="88" rx="1.5" ry="1.5" fill="#ffffff" fill-opacity="0.35"/></g>
+<g id="switch0"><rect x="1977" y="410" width="46" height="70" rx="9" ry="9" fill="url(#btn-h)" stroke="#000000" stroke-opacity="0.35" stroke-width="1.5"/><rect x="2018" y="419" width="3" height="52" rx="1.5" ry="1.5" fill="#ffffff" fill-opacity="0.35"/></g>
+<rect x="110" y="110" width="1897" height="2428" rx="150" ry="150" id="body" fill="url(#rim)"/>
+<rect x="112.5" y="112.5" width="1892" height="2423" rx="147.5" ry="147.5" id="rim.edge" fill="none" stroke="#ffffff" stroke-opacity="0.45" stroke-width="2"/>
+<rect x="150.5" y="150.5" width="1816" height="2347" rx="109.5" ry="109.5" id="rim.seam" fill="#000000" fill-opacity="0.55"/>
+<rect x="152" y="152" width="1813" height="2344" rx="108" ry="108" id="face" fill="url(#glass)"/>
+<rect x="154" y="154" width="1809" height="2340" rx="106" ry="106" id="face.edge" fill="none" stroke="#ffffff" stroke-opacity="0.07" stroke-width="2"/>
+<rect x="152" y="152" width="1813" height="2344" rx="108" ry="108" id="face.sheen" fill="url(#sheen)"/>
+<rect x="307.5" y="326.5" width="1502" height="1995" rx="2" ry="2" id="lcd" fill="#060607" stroke="#232428" stroke-opacity="0.7" stroke-width="1.5"/>
+<rect id="screen" x="319.5" y="338.5" width="1478" height="1971" fill="url(#panel)"/>
+<g id="home">
+<circle cx="1058.5" cy="2424" r="56" fill="url(#home-dish)" stroke="#3b3b40" stroke-width="2.5"/>
+<circle cx="1058.5" cy="2424" r="53" fill="none" stroke="#000000" stroke-opacity="0.6" stroke-width="2"/>
+<rect x="1039.46" y="2404.96" width="38.08" height="38.08" rx="7.84" ry="7.84" fill="none" stroke="#8c8c92" stroke-width="3.584"/>
+</g>
+<path id="glare" d="M319.5,338.5 L1679.26,338.5 L319.5,1560.52 Z" fill="url(#shine)" fill-opacity="0.5"/>
+</svg>

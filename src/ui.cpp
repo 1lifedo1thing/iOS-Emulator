@@ -5,6 +5,7 @@
 #include "engine.h"
 #include "firmware.h"
 #include "session.h"
+#include "skin.h"
 
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
@@ -44,6 +45,7 @@ struct Settings {
     bool smooth = true;        // smooth scaling of the screen (off: sharp pixels)
     bool tilt = true;          // arrow keys tilt the device
     bool sendKeys = false;     // what you type goes to iOS (the hardware shortcuts then take Ctrl)
+    bool devTools = false;     // the developer tools show beside a running device
     std::string selected;      // the device selected last
 
     static fs::path File() { return DataDir() / "settings.json"; }
@@ -58,6 +60,7 @@ struct Settings {
             smooth = j.value("smooth", smooth);
             tilt = j.value("tilt", tilt);
             sendKeys = j.value("sendKeys", sendKeys);
+            devTools = j.value("devTools", devTools);
             selected = j.value("selected", selected);
         } catch (...) {
             // first start, or an unreadable file: keep the defaults
@@ -67,7 +70,7 @@ struct Settings {
     void Save() const {
         Json j = {{"internet", internet}, {"webProxy", webProxy}, {"headphones", headphones},
                   {"muted", muted},       {"smooth", smooth},     {"tilt", tilt},
-                  {"sendKeys", sendKeys}, {"selected", selected}};
+                  {"sendKeys", sendKeys}, {"devTools", devTools}, {"selected", selected}};
         SaveFile(File(), j.dump(2));
     }
 
@@ -75,18 +78,37 @@ struct Settings {
     std::string Shortcut(const char *keys) const { return (sendKeys ? "Ctrl+" : "") + std::string(keys); }
 };
 
-// ---- Tilt ------------------------------------------------------------------------------------
+// ---- Motion ----------------------------------------------------------------------------------
 
-// Leans the device with the arrow keys, as LightTouch does: each arrow lowers that edge up to 35
-// degrees, easing there and back. Produces accelerometer samples in the guest's portrait axes
-// (x right, y up, z toward you, m/s^2). At rest the device lies flat, face up.
-class Tilt {
+// What the accelerometer feels, in the guest's portrait axes (x right, y up, z toward you, m/s^2; at
+// rest it points away from the ground). In portrait the device lies flat, face up. In landscape it
+// stands on its side with Home on the right, so iOS turns the apps that support it. Turning back to
+// portrait stands it upright for a second (iOS keeps its last orientation while a device lies flat).
+// The arrow keys lean it, as LightTouch does: each lowers that edge, as shown, up to 35 degrees,
+// easing there and back.
+class Motion {
 public:
     // Returns true when there's a new sample to send.
-    bool Step(bool left, bool right, bool up, bool down, double acceleration[3]) {
+    bool Step(Orientation orientation, bool left, bool right, bool up, bool down, double acceleration[3]) {
         const uint64_t now = NowNs();
         const double dt = last_ ? std::min((now - last_) / 1e9, 0.1) : 0.0;
         last_ = now;
+
+        // Which way is up for the device at rest.
+        if (orientation == Orientation::Portrait && orientation_ == Orientation::Landscape)
+            uprightUntil_ = now + 1'000'000'000;
+        orientation_ = orientation;
+        double base[3] = {0, 0, 1};                      // flat, face up
+        if (orientation == Orientation::Landscape)
+            base[0] = 1, base[2] = 0;                    // on its side, Home on the right
+        else if (now < uprightUntil_)
+            base[1] = 1, base[2] = 0;                    // upright
+
+        // The arrows as shown, in the device's own directions: in landscape its top is on the left.
+        if (orientation == Orientation::Landscape) {
+            const bool shownLeft = left, shownRight = right, shownUp = up, shownDown = down;
+            left = shownDown, right = shownUp, up = shownLeft, down = shownRight;
+        }
         const double maxAngle = 35.0 * 3.14159265 / 180, reach = 150.0 * 3.14159265 / 180 * dt;
         const double rollTo = (int(right) - int(left)) * maxAngle, pitchTo = (int(down) - int(up)) * maxAngle;
         auto approach = [&](double from, double to) {
@@ -96,18 +118,34 @@ public:
         const bool moving = roll != roll_ || pitch != pitch_ || roll != 0 || pitch != 0;
         roll_ = roll;
         pitch_ = pitch;
+
+        // Lean the base: rolling turns it about the device's y axis, pitching about its x axis.
         const double g = 9.80665;
-        acceleration[0] = -g * std::sin(roll);
-        acceleration[1] = g * std::cos(roll) * std::sin(pitch);
-        acceleration[2] = g * std::cos(roll) * std::cos(pitch);
-        const bool send = moving || wasMoving_;   // one last sample once it's back at rest
+        const double x1 = base[0] * std::cos(roll) - base[2] * std::sin(roll);
+        const double z1 = base[0] * std::sin(roll) + base[2] * std::cos(roll);
+        acceleration[0] = g * x1;
+        acceleration[1] = g * (base[1] * std::cos(pitch) + z1 * std::sin(pitch));
+        acceleration[2] = g * (-base[1] * std::sin(pitch) + z1 * std::cos(pitch));
+
+        // Send while it moves (one last sample once it's back at rest), when its base changes, and
+        // every second while it isn't lying flat (the worker holds a sample; this covers one sent
+        // before iOS was up).
+        const bool flat = base[2] == 1;
+        const bool changed = base[0] != base_[0] || base[1] != base_[1] || base[2] != base_[2];
+        const bool refresh = !flat && now - sent_ > 1'000'000'000;
+        std::copy(base, base + 3, base_);
+        const bool send = moving || wasMoving_ || changed || refresh;
         wasMoving_ = moving;
+        if (send)
+            sent_ = now;
         return send;
     }
 
 private:
+    Orientation orientation_ = Orientation::Portrait;
+    double base_[3] = {0, 0, 1};
     double roll_ = 0, pitch_ = 0;
-    uint64_t last_ = 0;
+    uint64_t last_ = 0, sent_ = 0, uprightUntil_ = 0;
     bool wasMoving_ = false;
 };
 
@@ -173,6 +211,58 @@ void Tooltip(const char *text) {
         ImGui::SetTooltip("%s", text);
 }
 
+// Fonts besides the UI's own, loaded in RunUi (null when Windows lacks them): a large one for the
+// version wheel, a semibold one for titles. g_icons tells whether the icons below were merged in.
+ImFont *g_largeFont = nullptr, *g_titleFont = nullptr;
+bool g_icons = false;
+
+// Icons: glyphs of Windows' Segoe MDL2 Assets font, merged into the UI font.
+namespace icon {
+const char *const kRotate = "", *const kPause = "", *const kPlay = "", *const kCamera = "",
+                  *const kFullscreen = "", *const kVolume = "", *const kMute = "",
+                  *const kGlobe = "", *const kLock = "", *const kStop = "", *const kCode = "",
+                  *const kLeft = "", *const kRight = "";
+}
+
+// A toolbar button: its icon (or `name`, without the icon font), drawn highlighted while `on`.
+bool IconButton(const char *icon, const char *name, const std::string &tip, bool on = false) {
+    if (on) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.19f, 0.33f, 0.56f, 1));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.40f, 0.66f, 1));
+    }
+    ImGui::PushID(name);
+    const bool clicked = g_icons ? ImGui::Button(icon, ImVec2(ImGui::GetFrameHeight() * 1.4f, 0)) : ImGui::Button(name);
+    ImGui::PopID();
+    if (on)
+        ImGui::PopStyleColor(2);
+    Tooltip(tip.c_str());
+    return clicked;
+}
+
+// The width IconButton takes.
+float IconButtonWidth(const char *name) {
+    return g_icons ? ImGui::GetFrameHeight() * 1.4f
+                   : ImGui::CalcTextSize(name).x + ImGui::GetStyle().FramePadding.x * 2;
+}
+
+float ButtonWidth(const char *label) { return ImGui::CalcTextSize(label).x + ImGui::GetStyle().FramePadding.x * 2; }
+
+// Moves the cursor so that a row `width` pixels wide is centred in the space left on this line.
+void CenterRow(float width) {
+    const float avail = ImGui::GetContentRegionAvail().x;
+    if (avail > width)
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail - width) / 2);
+}
+
+// Text in another font (or the UI's, when it's missing).
+void FontText(ImFont *font, const std::string &text, ImVec4 color = ImVec4(1, 1, 1, 1)) {
+    if (font)
+        ImGui::PushFont(font);
+    ImGui::TextColored(color, "%s", text.c_str());
+    if (font)
+        ImGui::PopFont();
+}
+
 fs::path PicturesDir() {
     PWSTR path = nullptr;
     fs::path dir;
@@ -183,6 +273,135 @@ fs::path PicturesDir() {
         dir = DataDir() / "screenshots";
     fs::create_directories(dir);
     return dir;
+}
+
+// ---- The drum wheel --------------------------------------------------------------------------
+
+// A wheel's motion, kept between frames.
+struct Drum {
+    float position = 0;     // the row at its centre (between two while it turns)
+    float target = 0;       // the row it's easing to
+    float velocity = 0;     // rows per second, while it coasts after a fling
+    bool dragging = false, dragged = false;
+    float pressedAt = 0;    // where the mouse went down (y)
+    int chosen = -1;        // the row it last reported
+};
+
+struct WheelRow {
+    std::string label, detail;   // "iOS 4.2.1", "8C148"
+    bool tested = false;         // marked with a green dot
+};
+
+// A drum wheel like iOS's picker: the rows sit on a turning cylinder, and the one in the middle band
+// is chosen. It turns with the mouse wheel, by dragging (it coasts a little when let go, then settles
+// on a row), by clicking a row, and with Up and Down while the mouse is over it. `selected` is the
+// chosen row, in and out.
+void DrumPicker(const char *id, const std::vector<WheelRow> &rows, int &selected, Drum &drum, float width,
+                int visibleRows = 7) {
+    const int count = int(rows.size());
+    if (count == 0)
+        return;
+    ImFont *font = g_largeFont ? g_largeFont : ImGui::GetFont();
+    const float rowHeight = std::floor(font->FontSize * 1.55f), height = rowHeight * visibleRows;
+    const float radius = height / 2;   // of the cylinder, so its visible half fills the wheel
+    const ImGuiIO &io = ImGui::GetIO();
+    const float dt = std::min(io.DeltaTime, 0.05f);
+    const ImVec2 min = ImGui::GetCursorScreenPos(), max(min.x + width, min.y + height);
+    const float centerY = (min.y + max.y) / 2;
+
+    if (selected != drum.chosen)   // chosen from outside (a new device): turn to it
+        drum.target = float(selected);
+
+    ImGui::InvisibleButton(id, ImVec2(width, height));
+    const bool hovered = ImGui::IsItemHovered();
+    if (ImGui::IsItemActivated()) {
+        drum.dragging = true;
+        drum.dragged = false;
+        drum.velocity = 0;
+        drum.pressedAt = io.MousePos.y;
+    }
+    if (drum.dragging && ImGui::IsItemActive()) {
+        // Dragging turns it under the mouse; the speed of the last moments carries on when let go.
+        const float rows = io.MouseDelta.y / rowHeight;
+        drum.position = std::clamp(drum.position - rows, -0.4f, count - 0.6f);
+        if (dt > 0)
+            drum.velocity = drum.velocity * 0.6f + (-rows / dt) * 0.4f;
+        drum.dragged |= std::abs(io.MousePos.y - drum.pressedAt) > 4;
+    }
+    if (ImGui::IsItemDeactivated()) {
+        drum.dragging = false;
+        if (!drum.dragged) {   // a click: turn to the row under the mouse
+            const float s = std::clamp((io.MousePos.y - centerY) / radius, -0.99f, 0.99f);
+            drum.target = std::round(drum.position + std::asin(s) * radius / rowHeight);
+            drum.velocity = 0;
+        }
+    }
+    if (hovered && io.MouseWheel != 0) {
+        drum.target = std::round(drum.target) - io.MouseWheel;
+        drum.velocity = 0;
+    }
+    if (hovered && ImGui::IsKeyPressed(ImGuiKey_UpArrow))
+        drum.target = std::round(drum.target) - 1, drum.velocity = 0;
+    if (hovered && ImGui::IsKeyPressed(ImGuiKey_DownArrow))
+        drum.target = std::round(drum.target) + 1, drum.velocity = 0;
+
+    if (!drum.dragging) {
+        if (std::abs(drum.velocity) > 0.8f) {   // coasting after a fling, slowing down
+            drum.position += drum.velocity * dt;
+            drum.velocity *= std::exp(-5.0f * dt);
+            drum.target = std::round(drum.position);
+            if (drum.position < 0 || drum.position > count - 1)
+                drum.velocity = 0;
+        } else {                                 // easing onto the target row
+            drum.velocity = 0;
+            drum.target = std::clamp(drum.target, 0.0f, float(count - 1));
+            drum.position += (drum.target - drum.position) * std::min(1.0f, dt * 14);
+            if (std::abs(drum.target - drum.position) < 0.001f)
+                drum.position = drum.target;
+        }
+    }
+    selected = std::clamp(int(std::lround(drum.position)), 0, count - 1);
+    drum.chosen = selected;
+
+    // The wheel: a dark well, the selection band, then the rows on the cylinder.
+    ImDrawList *draw = ImGui::GetWindowDrawList();
+    const float rounding = ImGui::GetFontSize() * 0.6f;
+    draw->AddRectFilled(min, max, IM_COL32(22, 24, 28, 255), rounding);
+    const ImVec2 bandMin(min.x + 6, centerY - rowHeight / 2), bandMax(max.x - 6, centerY + rowHeight / 2);
+    draw->AddRectFilled(bandMin, bandMax, IM_COL32(74, 143, 250, 38), rounding * 0.6f);
+    draw->AddLine(ImVec2(bandMin.x, bandMin.y), ImVec2(bandMax.x, bandMin.y), IM_COL32(255, 255, 255, 40));
+    draw->AddLine(ImVec2(bandMin.x, bandMax.y), ImVec2(bandMax.x, bandMax.y), IM_COL32(255, 255, 255, 40));
+    draw->PushClipRect(min, max, true);
+    const float pad = ImGui::GetFontSize() * 1.1f;
+    for (int i = 0; i < count; i++) {
+        const float angle = (i - drum.position) * rowHeight / radius;   // around the cylinder
+        if (std::abs(angle) > 1.5f)
+            continue;
+        const float facing = std::cos(angle);   // 1 facing you, toward 0 at the top and bottom
+        const float y = centerY + radius * std::sin(angle);
+        const bool center = i == selected;
+        const int alpha = int(255 * std::pow(facing, 2.0f));
+        const float size = font->FontSize * (0.72f + 0.28f * facing);
+        const ImVec2 labelSize = font->CalcTextSizeA(size, FLT_MAX, 0, rows[i].label.c_str());
+        const ImU32 ink = center ? IM_COL32(255, 255, 255, alpha) : IM_COL32(170, 174, 182, alpha);
+        draw->AddText(font, size, ImVec2(min.x + pad * 1.6f, std::floor(y - labelSize.y / 2)), ink, rows[i].label.c_str());
+        const ImVec2 detailSize = ImGui::CalcTextSize(rows[i].detail.c_str());
+        draw->AddText(ImVec2(max.x - pad - detailSize.x, std::floor(y - detailSize.y / 2)),
+                      IM_COL32(140, 144, 152, int(alpha * 0.85f)), rows[i].detail.c_str());
+        if (rows[i].tested)
+            draw->AddCircleFilled(ImVec2(min.x + pad * 0.8f, y), size * 0.14f,
+                                  IM_COL32(89, 204, 115, alpha));
+    }
+    draw->PopClipRect();
+    // The cylinder's edges fade into the well.
+    const float fade = height * 0.28f;
+    const ImU32 well = IM_COL32(22, 24, 28, 255), clear = IM_COL32(22, 24, 28, 0);
+    draw->AddRectFilledMultiColor(ImVec2(min.x, min.y + rounding), ImVec2(max.x, min.y + fade), well, well, clear, clear);
+    draw->AddRectFilledMultiColor(ImVec2(min.x, max.y - fade), ImVec2(max.x, max.y - rounding), clear, clear, well, well);
+    if (hovered)
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    if (count > 1 && hovered)
+        ImGui::SetItemTooltip("Scroll, drag or click to choose. A green dot marks a version tested to run well.");
 }
 
 // ---- The app ---------------------------------------------------------------------------------
@@ -207,12 +426,21 @@ public:
     }
     bool Finished() const { return finished_; }
     bool Busy() const { return !sessions_.empty(); }   // something on screen keeps changing
-    void ShowAddDevice() { page_ = Page::AddDevice; }
+    void ShowAddDevice(const std::string &productType = "") {   // the grid, or one device's versions
+        page_ = Page::AddDevice;
+        if (!productType.empty())
+            ChooseProduct(productType);
+    }
     bool Fullscreen() const { return fullscreen_; }    // the window should cover its monitor
     void EnterFullscreen() {                           // shows the selected device fullscreen, if it runs
         fullscreen_ = true;
         controlsShownAt_ = ImGui::GetTime();
     }
+    void SetLandscape() {                              // turns the selected device (for tests)
+        if (Device *device = Selected())
+            orientations_[device->id] = Orientation::Landscape;
+    }
+    void ShowDevTools(bool show) { settings_.devTools = show; }   // for tests: not saved
 
 private:
     enum class Page { Device, AddDevice, Settings };
@@ -227,18 +455,29 @@ private:
     void DevicePage(Device &device);
     void StoppedDeviceView(Device &device);
     void RunningDeviceView(Device &device, Session &session);
-    void DeviceScreen(Session &session, ImVec2 area);
+    void DeviceView(Device &device, Session *session, ImVec2 area);
+    void DevToolsTab(ImVec2 at, float height);
     ImVec2 ScreenSize(Session &session, bool &turned);
-    void DrawScreen(Session &session, ImVec2 origin, ImVec2 size, bool turned);
-    void ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, bool turned);
+    void DrawScreen(Session &session, ImVec2 origin, ImVec2 size, Orientation orientation);
+    void ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, Orientation orientation, bool turned);
     void FullscreenView(Session &session);
     void FullscreenControls(Session &session);
     void Controls(Session &session);
     void HardwareKeys(Session &session);
     void SendKeys(Session &session);
     void SaveScreenshot(Session &session);
+    void Rotate(const Device &device);
+    Orientation OrientationOf(const Device &device) {
+        auto found = orientations_.find(device.id);
+        return found != orientations_.end() ? found->second : Orientation::Portrait;
+    }
     void SettingsPage();
     void AddDevicePage();
+    void PreparationProgress();
+    void DeviceGrid();
+    void LightTouchImports();
+    void VersionPicker();
+    void ChooseProduct(const std::string &productType);
     void DeveloperPanel(Device &device, Session &session);
     void DevRequest(Session &session, Json command, std::function<void(const Json &)> onSuccess);
     void DevListFiles(const std::string &id, const std::string &path);
@@ -256,16 +495,19 @@ private:
     // Input state for the device on screen.
     bool touching_ = false, twoFingers_ = false;
     ImVec2 lastTouch_{-1, -1};
-    std::set<int> heldButtons_;
-    Tilt tilt_;
+    std::set<int> heldButtons_;                          // held from the keyboard
+    Motion motion_;
+    std::map<std::string, Orientation> orientations_;    // turned devices, by id (each start is portrait)
     std::string typeText_, renameText_;
 
     // Fullscreen: only the selected device's screen, with controls that show while the mouse moves.
     bool fullscreen_ = false;
     double controlsShownAt_ = 0;   // ImGui::GetTime() of the last mouse activity
 
-    // The Add Device page.
+    // The Add Device page: a grid of devices, then the chosen one's versions on a wheel.
     std::unique_ptr<Preparation> preparation_;
+    bool choosingVersion_ = false;                       // past the grid
+    Drum drum_;                                          // the version wheel
     std::string chosenProduct_ = "iPod3,1", chosenFirmware_ = "n18ap-8C148";
     std::string newName_;
     bool jailbreak_ = true;
@@ -342,6 +584,7 @@ void App::UpdateSessions() {
                 error_ = session.GetDevice().name + ": " + session.ExitMessage();
             textures_[it->first].Release();
             textures_.erase(it->first);
+            orientations_.erase(it->first);   // it starts upright next time
             it = sessions_.erase(it);
         } else {
             ++it;
@@ -487,18 +730,39 @@ void App::DevicePage(Device &device) {
         StoppedDeviceView(device);
 }
 
+// A stopped device: its picture with the screen off (its Sleep/Wake button starts it), Start, and
+// the Manage buttons.
 void App::StoppedDeviceView(Device &device) {
+    const ImGuiStyle &style = ImGui::GetStyle();
+    const float below = ImGui::GetFrameHeightWithSpacing() * 2 + ImGui::GetTextLineHeightWithSpacing() * 2 +
+                        style.ItemSpacing.y * 2 + (device.Dirty() ? ImGui::GetTextLineHeightWithSpacing() * 2 : 0);
     ImGui::Spacing();
-    if (device.Dirty())
-        ImGui::TextColored(kWarn, "Last time this device stopped without shutting iOS down. iOS will check its storage "
-                                  "as it starts.");
-    if (ImGui::Button("Start", ImVec2(160, 0)))
-        StartDevice(device);
-    ImGui::SameLine();
-    DimText(settings_.internet ? "with internet" : "without internet (change it in Settings)");
+    DeviceView(device, nullptr, ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetContentRegionAvail().y - below));
 
-    ImGui::Dummy(ImVec2(0, 20));
-    DimText("MANAGE");
+    if (device.Dirty()) {
+        const char *warning = "Last time this device stopped without shutting iOS down. iOS will check its storage "
+                              "as it starts.";
+        CenterRow(std::min(ImGui::CalcTextSize(warning).x, ImGui::GetContentRegionAvail().x));
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextColored(kWarn, "%s", warning);
+        ImGui::PopTextWrapPos();
+    }
+    const char *internet = settings_.internet ? "with internet" : "without internet (change it in Settings)";
+    const float startWidth = ImGui::GetFontSize() * 9;
+    CenterRow(startWidth);
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.42f, 0.78f, 1));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.26f, 0.50f, 0.88f, 1));
+    if (ImGui::Button("Start", ImVec2(startWidth, 0)))
+        StartDevice(device);
+    ImGui::PopStyleColor(2);
+    Tooltip("Or press the device's Sleep/Wake button.");
+    CenterRow(ImGui::CalcTextSize(internet).x);
+    DimText(internet);
+
+    ImGui::Spacing();
+    const float manageWidth = ButtonWidth("Rename") + ButtonWidth("Erase...") + ButtonWidth("Delete...") +
+                              ButtonWidth("Open folder") + style.ItemSpacing.x * 3;
+    CenterRow(manageWidth);
     if (ImGui::Button("Rename")) {
         renameText_ = device.name;
         ImGui::OpenPopup("Rename");
@@ -555,19 +819,139 @@ void App::StoppedDeviceView(Device &device) {
     }
 }
 
+// A running device: its picture with the live screen and the toolbar under it, and the developer
+// tools beside it when they're shown (the tab at the device's right edge shows and hides them).
 void App::RunningDeviceView(Device &device, Session &session) {
-    // Left: the device and its controls. Right: developer tools.
-    const float screenColumn = std::max(ImGui::GetContentRegionAvail().x * 0.48f, 360.0f);
-    ImGui::BeginChild("device", ImVec2(screenColumn, 0), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    const float controlsHeight = ImGui::GetFrameHeightWithSpacing() * 3 + 12;
-    DeviceScreen(session, ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetContentRegionAvail().y - controlsHeight));
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float column = settings_.devTools ? std::max(avail * 0.46f, 380.0f) : avail;
+    ImGui::BeginChild("device", ImVec2(column, 0), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    const float tab = ImGui::GetFontSize() * 1.6f;
+    const float controls = ImGui::GetFrameHeightWithSpacing() * 2 + ImGui::GetStyle().ItemSpacing.y + 4;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const ImVec2 area(ImGui::GetContentRegionAvail().x - tab - 6, ImGui::GetContentRegionAvail().y - controls);
+    DeviceView(device, &session, area);
+    DevToolsTab(ImVec2(origin.x + area.x + 6, origin.y), area.y);
+    ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + area.y + ImGui::GetStyle().ItemSpacing.y));
     Controls(session);
     ImGui::EndChild();
-    ImGui::SameLine();
-    ImGui::BeginChild("developer", ImVec2(0, 0), ImGuiChildFlags_Borders);
-    DeveloperPanel(device, session);
-    ImGui::EndChild();
+    if (settings_.devTools) {
+        ImGui::SameLine();
+        ImGui::BeginChild("developer", ImVec2(0, 0), ImGuiChildFlags_Borders);
+        DeveloperPanel(device, session);
+        ImGui::EndChild();
+    }
     HardwareKeys(session);
+}
+
+// The developer tools' tab: a slim, tall button at `at`, centred in `height`.
+void App::DevToolsTab(ImVec2 at, float height) {
+    const float width = ImGui::GetFontSize() * 1.6f, tall = std::min(height, ImGui::GetFontSize() * 7);
+    const ImVec2 min(at.x, at.y + (height - tall) / 2), max(min.x + width, min.y + tall);
+    ImGui::SetCursorScreenPos(min);
+    if (ImGui::InvisibleButton("devtools", ImVec2(width, tall))) {
+        settings_.devTools = !settings_.devTools;
+        settings_.Save();
+    }
+    Tooltip(settings_.devTools ? "Hide the developer tools" : "Show the developer tools: device info, files, apps, "
+                                                               "terminal, logs and SSH");
+    ImDrawList *draw = ImGui::GetWindowDrawList();
+    const bool hovered = ImGui::IsItemHovered(), active = ImGui::IsItemActive();
+    draw->AddRectFilled(min, max, ImGui::GetColorU32(active ? ImGuiCol_ButtonActive : hovered ? ImGuiCol_ButtonHovered
+                                                                                               : ImGuiCol_Button),
+                        width / 2);
+    const ImU32 ink = ImGui::GetColorU32(ImGuiCol_Text);
+    const float cx = (min.x + max.x) / 2, cy = (min.y + max.y) / 2;
+    if (g_icons) {   // the code icon, with an arrow pointing where the panel goes
+        const char *arrow = settings_.devTools ? icon::kRight : icon::kLeft;
+        const ImVec2 a = ImGui::CalcTextSize(icon::kCode), b = ImGui::CalcTextSize(arrow);
+        draw->AddText(ImVec2(cx - a.x / 2, cy - a.y - 4), ink, icon::kCode);
+        draw->AddText(ImVec2(cx - b.x / 2, cy + 4), ink, arrow);
+    } else {         // a drawn chevron
+        const float s = width * 0.18f, d = settings_.devTools ? s : -s;
+        const ImVec2 chevron[] = {ImVec2(cx - d / 2, cy - s), ImVec2(cx + d / 2, cy), ImVec2(cx - d / 2, cy + s)};
+        draw->AddPolyline(chevron, 3, ink, 0, 2);
+    }
+}
+
+// Fits a rectangle of `aspect` (width over height) into the area at `origin`, centred.
+void FitRect(ImVec2 origin, ImVec2 area, float aspect, ImVec2 &min, ImVec2 &max) {
+    const float width = std::min(area.x, area.y * aspect), height = width / aspect;
+    min = ImVec2(std::floor(origin.x + (area.x - width) / 2), std::floor(origin.y + (area.y - height) / 2));
+    max = ImVec2(min.x + width, min.y + height);
+}
+
+// The device as it looks, fitted into `area` at the cursor: its picture (skin.h), the screen (the
+// running iOS, or the glass of a stopped device), and its buttons, which work like the real ones:
+// held while the mouse button is. A stopped device's Sleep/Wake button starts it.
+void App::DeviceView(Device &device, Session *session, ImVec2 area) {
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    area = ImVec2(std::max(area.x, 40.0f), std::max(area.y, 40.0f));
+    const Orientation orientation = session ? OrientationOf(device) : Orientation::Portrait;
+    bool turned = false;
+    const ImVec2 upright = session ? ScreenSize(*session, turned) : ImVec2(2, 3);
+    Skin *skin = Skin::For(device.board);
+    SkinLayout layout;
+    if (skin) {
+        layout = skin->Fit(origin, area, orientation);
+    } else {   // no art: just the screen
+        const float aspect = orientation == Orientation::Landscape ? upright.y / upright.x : upright.x / upright.y;
+        FitRect(origin, area, aspect, layout.screenMin, layout.screenMax);
+    }
+
+    // The buttons first (they draw nothing themselves), so the picture can show them pressed.
+    int hovered = -1;
+    std::set<int> down = heldButtons_;
+    const bool canPress = !session || session->state != "stopping";
+    for (const SkinLayout::Button &button : layout.buttons) {
+        if (!canPress || (!session && button.button != QEMU_IOS_BUTTON_POWER))
+            continue;
+        ImGui::PushID(button.button);
+        ImGui::SetCursorScreenPos(button.hitMin);
+        ImGui::InvisibleButton("button", ImVec2(button.hitMax.x - button.hitMin.x, button.hitMax.y - button.hitMin.y));
+        if (ImGui::IsItemHovered()) {
+            hovered = button.button;
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        }
+        if (ImGui::IsItemActive())
+            down.insert(button.button);
+        const char *name = button.button == QEMU_IOS_BUTTON_HOME     ? "Home"
+                         : button.button == QEMU_IOS_BUTTON_POWER    ? "Sleep/Wake"
+                         : button.button == QEMU_IOS_BUTTON_VOLUME_UP ? "Volume up"
+                                                                       : "Volume down";
+        const char *key = button.button == QEMU_IOS_BUTTON_HOME      ? "H"
+                        : button.button == QEMU_IOS_BUTTON_POWER     ? "P"
+                        : button.button == QEMU_IOS_BUTTON_VOLUME_UP ? "+"
+                                                                       : "-";
+        if (session) {
+            if (ImGui::IsItemActivated())
+                session->Send({{"cmd", "button"}, {"button", button.button}, {"down", true}});
+            if (ImGui::IsItemDeactivated())
+                session->Send({{"cmd", "button"}, {"button", button.button}, {"down", false}});
+            std::string tip = std::string(name) + " (" + settings_.Shortcut(key) + ")";
+            if (button.button == QEMU_IOS_BUTTON_POWER)
+                tip += ". Hold it to power off.";
+            Tooltip(tip.c_str());
+        } else {
+            if (ImGui::IsItemClicked())
+                StartDevice(device);
+            Tooltip("Sleep/Wake: starts the device");
+        }
+        ImGui::PopID();
+    }
+
+    ImDrawList *draw = ImGui::GetWindowDrawList();
+    if (skin)
+        skin->Draw(draw, layout, [&](int button) { return down.count(button) > 0; }, hovered);
+    const ImVec2 screenSize(layout.screenMax.x - layout.screenMin.x, layout.screenMax.y - layout.screenMin.y);
+    if (session)
+        DrawScreen(*session, layout.screenMin, screenSize, orientation);
+    else if (!skin)
+        draw->AddRectFilled(layout.screenMin, layout.screenMax, IM_COL32(6, 6, 8, 255));
+    if (skin)
+        skin->DrawGlare(draw, layout);
+
+    ImGui::SetCursorScreenPos(origin);
+    ImGui::Dummy(area);
 }
 
 // Uploads the device's newest frame, and returns the screen's size upright, in pixels. A panel wider
@@ -582,77 +966,44 @@ ImVec2 App::ScreenSize(Session &session, bool &turned) {
     return turned ? ImVec2(height, width) : ImVec2(width, height);
 }
 
-// Draws the screen into the rectangle at `screen` (its upright size scaled) and makes it touchable.
-void App::DrawScreen(Session &session, ImVec2 screen, ImVec2 screenSize, bool turned) {
+// Draws the screen into the rectangle at `screen` (as shown, turned to `orientation`) and makes it
+// touchable.
+void App::DrawScreen(Session &session, ImVec2 screen, ImVec2 screenSize, Orientation orientation) {
+    bool turned;
+    ScreenSize(session, turned);
     const Texture &texture = textures_[session.GetDevice().id];
     ImDrawList *draw = ImGui::GetWindowDrawList();
     const ImVec2 screenEnd(screen.x + screenSize.x, screen.y + screenSize.y);
-    if (texture.id && !session.sleeping && turned)   // each corner shows the pixel the turn puts there
-        draw->AddImageQuad(ImTextureID(intptr_t(texture.id)), screen, ImVec2(screenEnd.x, screen.y), screenEnd,
-                           ImVec2(screen.x, screenEnd.y), ImVec2(0, 1), ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1));
-    else if (texture.id && !session.sleeping)
-        draw->AddImage(ImTextureID(intptr_t(texture.id)), screen, screenEnd);
-    else
+    if (texture.id && !session.sleeping) {   // each corner shows the pixel the turns put there
+        const ImVec2 corner[4] = {screen, ImVec2(screenEnd.x, screen.y), screenEnd, ImVec2(screen.x, screenEnd.y)};
+        const ImVec2 shown[4] = {ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1)};
+        ImVec2 uv[4];
+        for (int i = 0; i < 4; i++)
+            uv[i] = ToPanel(shown[i], orientation, turned);
+        draw->AddImageQuad(ImTextureID(intptr_t(texture.id)), corner[0], corner[1], corner[2], corner[3], uv[0], uv[1],
+                           uv[2], uv[3]);
+    } else {
         draw->AddRectFilled(screen, screenEnd, IM_COL32(0, 0, 0, 255));
-    if (!texture.id || session.sleeping) {
         const char *text = !texture.id ? "Starting iOS..." : "Display off: click to wake";
         const ImVec2 size = ImGui::CalcTextSize(text);
         draw->AddText(ImVec2(screen.x + (screenSize.x - size.x) / 2, screen.y + (screenSize.y - size.y) / 2),
                       IM_COL32(200, 200, 200, 255), text);
     }
-    ScreenTouch(session, screen, screenSize, turned);
-}
-
-// The device in its bezel, fitted into the area, with the Home button under the screen.
-void App::DeviceScreen(Session &session, ImVec2 area) {
-    bool turned;
-    const ImVec2 upright = ScreenSize(session, turned);
-    const float sw = upright.x, sh = upright.y;
-    // Fit a device-shaped bezel (screen plus room for the Home button) into the area.
-    const float side = 0.06f * sw, top = 0.16f * sh * sw / sh, bottom = 0.20f * sw;
-    const float scale = std::max(0.1f, std::min(area.x / (sw + 2 * side), area.y / (sh + top + bottom)));
-    const ImVec2 bezelSize((sw + 2 * side) * scale, (sh + top + bottom) * scale);
-    const ImVec2 cursor = ImGui::GetCursorScreenPos();
-    const ImVec2 bezel(cursor.x + (area.x - bezelSize.x) / 2, cursor.y);
-    const ImVec2 screen(bezel.x + side * scale, bezel.y + top * scale);
-    const ImVec2 screenSize(sw * scale, sh * scale);
-    const ImVec2 screenEnd(screen.x + screenSize.x, screen.y + screenSize.y);
-
-    ImDrawList *draw = ImGui::GetWindowDrawList();
-    draw->AddRectFilled(bezel, ImVec2(bezel.x + bezelSize.x, bezel.y + bezelSize.y), IM_COL32(24, 24, 27, 255),
-                        28 * scale);
-    draw->AddRect(bezel, ImVec2(bezel.x + bezelSize.x, bezel.y + bezelSize.y), IM_COL32(70, 70, 76, 255),
-                  28 * scale, 0, 2);
-    DrawScreen(session, screen, screenSize, turned);
-
-    // The Home button: a circle under the screen you can click (H on the keyboard does the same).
-    const float radius = bottom * scale * 0.3f;
-    const ImVec2 home(screen.x + screenSize.x / 2, screenEnd.y + bottom * scale / 2);
-    ImGui::SetCursorScreenPos(ImVec2(home.x - radius, home.y - radius));
-    ImGui::InvisibleButton("home", ImVec2(radius * 2, radius * 2));
-    if (ImGui::IsItemActivated())
-        session.Send({{"cmd", "button"}, {"button", QEMU_IOS_BUTTON_HOME}, {"down", true}});
-    if (ImGui::IsItemDeactivated())
-        session.Send({{"cmd", "button"}, {"button", QEMU_IOS_BUTTON_HOME}, {"down", false}});
-    Tooltip(("Home (" + settings_.Shortcut("H") + ")").c_str());
-    draw->AddCircle(home, radius, ImGui::IsItemHovered() ? IM_COL32(150, 150, 160, 255) : IM_COL32(90, 90, 96, 255),
-                    0, 2);
-    draw->AddRect(ImVec2(home.x - radius * 0.38f, home.y - radius * 0.38f),
-                  ImVec2(home.x + radius * 0.38f, home.y + radius * 0.38f), IM_COL32(90, 90, 96, 255), 3 * scale);
-    ImGui::SetCursorScreenPos(ImVec2(cursor.x, cursor.y + area.y));
+    ScreenTouch(session, screen, screenSize, orientation, turned);
 }
 
 // The mouse is a finger: press, drag and release on the screen. Hold Alt while dragging for a
 // second, mirrored finger (pinch and rotate), on boards with multi-touch.
-void App::ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, bool turned) {
+void App::ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, Orientation orientation, bool turned) {
     ImGui::SetCursorScreenPos(origin);
     ImGui::InvisibleButton("screen", size);
     const ImVec2 mouse = ImGui::GetIO().MousePos;
     const float x = std::clamp((mouse.x - origin.x) / size.x, 0.0f, 1.0f);
     const float y = std::clamp((mouse.y - origin.y) / size.y, 0.0f, 1.0f);
-    // The engine wants panel coordinates: on a turned panel, (x, y) on screen is (y, 1 - x) there.
+    // The engine wants the panel's own coordinates, before the device's turn and the panel's.
     auto contact = [&](int id, int phase, float u, float v) {
-        return Json{{"id", id}, {"phase", phase}, {"x", turned ? v : u}, {"y", turned ? 1 - u : v}};
+        const ImVec2 panel = ToPanel(ImVec2(u, v), orientation, turned);
+        return Json{{"id", id}, {"phase", phase}, {"x", panel.x}, {"y", panel.y}};
     };
     auto send = [&](int phase) {
         Json contacts = Json::array({contact(1, phase, x, y)});
@@ -713,6 +1064,21 @@ void DrawPowerIcon(ImDrawList *draw, ImVec2 c, float r, ImU32 ink) {
     draw->AddLine(ImVec2(c.x, c.y - radius * 1.25f), ImVec2(c.x, c.y - radius * 0.2f), ink, width);
 }
 
+// Rotate: an arrow going three quarters of the way round.
+void DrawRotateIcon(ImDrawList *draw, ImVec2 c, float r, ImU32 ink) {
+    const float width = r * 0.10f, radius = r * 0.38f, pi = 3.14159265f;
+    const float from = -pi * 0.35f, to = pi * 1.15f;
+    draw->PathArcTo(c, radius, from, to, 32);
+    draw->PathStroke(ink, 0, width);
+    // the arrowhead at the arc's end, pointing along it
+    const ImVec2 tip(c.x + std::cos(to) * radius, c.y + std::sin(to) * radius);
+    const ImVec2 along(-std::sin(to), std::cos(to)), out(std::cos(to), std::sin(to));
+    const float head = r * 0.2f;
+    draw->AddTriangleFilled(ImVec2(tip.x + along.x * head, tip.y + along.y * head),
+                            ImVec2(tip.x + out.x * head * 0.8f, tip.y + out.y * head * 0.8f),
+                            ImVec2(tip.x - out.x * head * 0.8f, tip.y - out.y * head * 0.8f), ink);
+}
+
 // Leave fullscreen: four corners pointing inward.
 void DrawExitFullscreenIcon(ImDrawList *draw, ImVec2 c, float r, ImU32 ink) {
     const float width = r * 0.09f, outer = r * 0.42f, inner = r * 0.14f;
@@ -738,18 +1104,21 @@ void App::FullscreenView(Session &session) {
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(2);
     bool turned;
-    const ImVec2 upright = ScreenSize(session, turned);
-    const float scale = std::min(viewport->Size.x / upright.x, viewport->Size.y / upright.y);
-    const ImVec2 size(upright.x * scale, upright.y * scale);
+    const Orientation orientation = OrientationOf(session.GetDevice());
+    ImVec2 shown = ScreenSize(session, turned);
+    if (orientation == Orientation::Landscape)
+        shown = ImVec2(shown.y, shown.x);
+    const float scale = std::min(viewport->Size.x / shown.x, viewport->Size.y / shown.y);
+    const ImVec2 size(shown.x * scale, shown.y * scale);
     DrawScreen(session,
                ImVec2(viewport->Pos.x + (viewport->Size.x - size.x) / 2, viewport->Pos.y + (viewport->Size.y - size.y) / 2),
-               size, turned);
+               size, orientation);
     ImGui::End();
     FullscreenControls(session);   // a window of its own, so it sits over the screen
     HardwareKeys(session);
 }
 
-// The fullscreen controls along the bottom: Volume down and up, Home, Sleep/Wake, and Leave
+// The fullscreen controls along the bottom: Volume down and up, Home, Sleep/Wake, Rotate and Leave
 // fullscreen. They show when the mouse moves and fade out a few seconds after it stops, unless
 // it's over them.
 void App::FullscreenControls(Session &session) {
@@ -762,7 +1131,7 @@ void App::FullscreenControls(Session &session) {
         return;
 
     const float button = ImGui::GetFontSize() * 2.8f, gap = button * 0.3f, pad = button * 0.2f;
-    const ImVec2 size(5 * button + 5 * gap + 2 * pad, button + 2 * pad);   // 5 buttons, the last set apart
+    const ImVec2 size(6 * button + 6 * gap + 2 * pad, button + 2 * pad);   // 6 buttons, the last set apart
     const ImGuiViewport *viewport = ImGui::GetMainViewport();
     const ImVec2 at(viewport->Pos.x + (viewport->Size.x - size.x) / 2,
                     viewport->Pos.y + viewport->Size.y - size.y - button * 0.4f);
@@ -805,6 +1174,10 @@ void App::FullscreenControls(Session &session) {
                  [&](ImVec2 c, float r, ImU32 ink) { DrawHomeIcon(draw, c, r, ink); });
     deviceButton("power", QEMU_IOS_BUTTON_POWER, "Sleep/Wake (" + settings_.Shortcut("P") + "). Hold it to power off.",
                  [&](ImVec2 c, float r, ImU32 ink) { DrawPowerIcon(draw, c, r, ink); });
+    if (roundButton("rotate", "Rotate (" + settings_.Shortcut("R") + ")",
+                    [&](ImVec2 c, float r, ImU32 ink) { DrawRotateIcon(draw, c, r, ink); }))
+        Rotate(session.GetDevice());
+    ImGui::SameLine();
     // A thin line, then Leave fullscreen.
     const float lineX = ImGui::GetCursorScreenPos().x;   // halfway between Sleep/Wake and Leave
     draw->AddLine(ImVec2(lineX, at.y + pad + button * 0.2f), ImVec2(lineX, at.y + pad + button * 0.8f), gray(255, 60),
@@ -821,8 +1194,8 @@ void App::FullscreenControls(Session &session) {
 
 // ---- Keyboard --------------------------------------------------------------------------------
 
-// The hardware shortcuts: H Home, P Sleep/Wake, + and - volume (held while the key is), arrows tilt.
-// While what you type goes to iOS (the "Send keyboard input to iOS" setting), they take Ctrl.
+// The hardware shortcuts: H Home, P Sleep/Wake, + and - volume (held while the key is), R rotates,
+// arrows tilt. While what you type goes to iOS (the "Send keyboard input to iOS" setting), they take Ctrl.
 void App::HardwareKeys(Session &session) {
     const ImGuiIO &io = ImGui::GetIO();
     const bool typing = io.WantTextInput;
@@ -843,13 +1216,21 @@ void App::HardwareKeys(Session &session) {
             heldButtons_.erase(button);
         session.Send({{"cmd", "button"}, {"button", button}, {"down", down}});
     }
-    if (settings_.tilt) {
-        double a[3];
-        if (tilt_.Step(key(ImGuiKey_LeftArrow), key(ImGuiKey_RightArrow), key(ImGuiKey_UpArrow),
-                       key(ImGuiKey_DownArrow), a))
-            session.Send({{"cmd", "motion"}, {"x", a[0]}, {"y", a[1]}, {"z", a[2]}});
-    }
+    if (!typing && modifiers && ImGui::IsKeyPressed(ImGuiKey_R, false))
+        Rotate(session.GetDevice());
+    const bool tilt = settings_.tilt;
+    double a[3];
+    if (motion_.Step(OrientationOf(session.GetDevice()), tilt && key(ImGuiKey_LeftArrow), tilt && key(ImGuiKey_RightArrow),
+                     tilt && key(ImGuiKey_UpArrow), tilt && key(ImGuiKey_DownArrow), a))
+        session.Send({{"cmd", "motion"}, {"x", a[0]}, {"y", a[1]}, {"z", a[2]}});
     SendKeys(session);
+}
+
+// Turns the device between portrait and landscape: the picture turns, and the accelerometer tells
+// iOS (Motion), which turns the apps that support it.
+void App::Rotate(const Device &device) {
+    orientations_[device.id] =
+        OrientationOf(device) == Orientation::Portrait ? Orientation::Landscape : Orientation::Portrait;
 }
 
 // With "Send keyboard input to iOS" on, what you type goes to iOS while no text box here has focus:
@@ -875,69 +1256,88 @@ void App::SendKeys(Session &session) {
     }
 }
 
+// The toolbar under the device: Rotate, Pause, Screenshot, Fullscreen | Sound, Internet, Web proxy |
+// Stop, with the box for typing into iOS under it. The hardware buttons are on the device itself.
 void App::Controls(Session &session) {
     const bool ready = session.state == "running" || session.state == "paused";
-    auto pressButton = [&](const char *label, int button, const std::string &tip) {
-        ImGui::Button(label);
-        if (ImGui::IsItemActivated())
-            session.Send({{"cmd", "button"}, {"button", button}, {"down", true}});
-        if (ImGui::IsItemDeactivated())
-            session.Send({{"cmd", "button"}, {"button", button}, {"down", false}});
-        Tooltip(tip.c_str());
-        ImGui::SameLine();
-    };
+    const ImGuiStyle &style = ImGui::GetStyle();
+    const float gap = style.ItemSpacing.x * 2;   // between the groups
+    const char *mark = "(!)";
+    const char *names[] = {"Rotate", session.paused ? "Resume" : "Pause", "Screenshot", "Fullscreen", "Sound",
+                           "Internet", "Web proxy", "Stop"};
+    float width = gap * 2 + style.ItemSpacing.x * 5;
+    for (const char *name : names)
+        width += IconButtonWidth(name);
+    if (session.proxyError)
+        width += ImGui::CalcTextSize(mark).x + style.ItemSpacing.x;
+    CenterRow(width);
+
+    const bool accelerometer = session.capabilities & QEMU_IOS_CAP_ACCEL;
+    const bool landscape = OrientationOf(session.GetDevice()) == Orientation::Landscape;
+    if (IconButton(icon::kRotate, "Rotate",
+                   std::string(landscape ? "Back to portrait" : "Turn to landscape") + " (" + settings_.Shortcut("R") + ")" +
+                       (accelerometer ? "" : ". This device has no accelerometer, so iOS itself doesn't turn."),
+                   landscape))
+        Rotate(session.GetDevice());
+    ImGui::SameLine();
     ImGui::BeginDisabled(!ready);
-    pressButton("Home", QEMU_IOS_BUTTON_HOME, "Home button (" + settings_.Shortcut("H") + ")");
-    pressButton("Sleep/Wake", QEMU_IOS_BUTTON_POWER,
-                "Sleep/Wake button (" + settings_.Shortcut("P") + "). Hold it to power off.");
-    pressButton("Vol -", QEMU_IOS_BUTTON_VOLUME_DOWN, "Volume down (" + settings_.Shortcut("-") + ")");
-    pressButton("Vol +", QEMU_IOS_BUTTON_VOLUME_UP, "Volume up (" + settings_.Shortcut("+") + ")");
-    if (ImGui::Button(session.paused ? "Resume" : "Pause"))
+    if (IconButton(session.paused ? icon::kPlay : icon::kPause, names[1], session.paused ? "Resume" : "Pause",
+                   session.paused))
         session.Send({{"cmd", "pause"}, {"paused", !session.paused}});
+    ImGui::SameLine();
+    if (IconButton(icon::kCamera, "Screenshot", "Save a screenshot to Pictures\\iOS-Emulator"))
+        SaveScreenshot(session);
     ImGui::EndDisabled();
     ImGui::SameLine();
-    if (ImGui::Button("Fullscreen"))
+    if (IconButton(icon::kFullscreen, "Fullscreen", "Only the screen, on the whole monitor (F11). F11 or Esc leaves it."))
         EnterFullscreen();
-    Tooltip("Only the screen, on the whole monitor (F11). F11 or Esc leaves it.");
 
-    bool sound = !session.muted;
-    if (ImGui::Checkbox("Sound", &sound)) {
-        session.muted = !sound;
+    ImGui::SameLine(0, gap);
+    if (IconButton(session.muted ? icon::kMute : icon::kVolume, "Sound", session.muted ? "Sound is off" : "Sound is on",
+                   !session.muted)) {
+        session.muted = !session.muted;
         session.Send({{"cmd", "mute"}, {"muted", session.muted}});
     }
     ImGui::SameLine();
     ImGui::BeginDisabled(!ready);
-    if (ImGui::Checkbox("Internet", &session.internet))
+    if (IconButton(icon::kGlobe, "Internet",
+                   std::string("Internet is ") + (session.internet ? "on" : "off") +
+                       ": lets iOS reach the internet through your connection (Cydia needs it).",
+                   session.internet)) {
+        session.internet = !session.internet;
         session.Send({{"cmd", "internet"}, {"on", session.internet}});
-    Tooltip("Lets iOS reach the internet through your connection (Cydia needs it).");
-    ImGui::SameLine();
-    if (ImGui::Checkbox("Web proxy", &session.webProxy))
-        session.Send({{"cmd", "webproxy"}, {"on", session.webProxy}});
-    const std::string proxyTip =
-        std::string(kWebProxyTip) + (session.proxyStatus.empty() ? "" : "\n\n" + session.proxyStatus);
-    Tooltip(proxyTip.c_str());
-    if (session.proxyError) {
-        ImGui::SameLine();
-        ImGui::TextColored(kWarn, "(!)");
-        Tooltip(session.proxyStatus.c_str());
     }
     ImGui::SameLine();
-    if (ImGui::Button("Screenshot"))
-        SaveScreenshot(session);
-    ImGui::SameLine();
+    const std::string proxyTip = std::string("Web proxy is ") + (session.webProxy ? "on" : "off") + ". " +
+                                 kWebProxyTip + (session.proxyStatus.empty() ? "" : "\n\n" + session.proxyStatus);
+    if (IconButton(icon::kLock, "Web proxy", proxyTip, session.webProxy)) {
+        session.webProxy = !session.webProxy;
+        session.Send({{"cmd", "webproxy"}, {"on", session.webProxy}});
+    }
     ImGui::EndDisabled();
-    if (Button("Stop", session.state != "stopping"))
+    if (session.proxyError) {
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(kWarn, "%s", mark);
+        Tooltip(session.proxyStatus.c_str());
+    }
+
+    ImGui::SameLine(0, gap);
+    ImGui::BeginDisabled(session.state == "stopping");
+    if (IconButton(icon::kStop, "Stop", "Shut down: iOS stops cleanly, like sliding to power off."))
         session.Stop();
-    Tooltip("Shuts iOS down cleanly, like sliding to power off.");
+    ImGui::EndDisabled();
 
     // Typing: the worker types the text into the text field that has focus in iOS (worker.h,
     // "type"). A (!) after the box tells what couldn't be typed.
     ImGui::BeginDisabled(!ready);
     const char *problemMark = "(!)";
+    const float rowWidth = std::min(ImGui::GetContentRegionAvail().x, std::max(width, ImGui::GetFontSize() * 24));
+    CenterRow(rowWidth);
     float reserve = ImGui::CalcTextSize("Type").x + ImGui::GetStyle().FramePadding.x * 2 + 8;
     if (!session.typingProblem.empty())
         reserve += ImGui::CalcTextSize(problemMark).x + 8;
-    ImGui::SetNextItemWidth(-reserve);
+    ImGui::SetNextItemWidth(rowWidth - reserve);
     bool enter = ImGui::InputTextWithHint("##type", "Type into iOS (Enter sends)", &typeText_,
                                           ImGuiInputTextFlags_EnterReturnsTrue);
     Tooltip("Typed into the text field that has focus in iOS, so tap one first.");
@@ -997,11 +1397,13 @@ void App::SettingsPage() {
     ImGui::Spacing();
     DimText("CONTROLS");
     ImGui::BulletText("Click and drag on the screen to touch. Hold Alt while dragging to pinch or rotate.");
+    ImGui::BulletText("The device's buttons work: click Home, Sleep/Wake or the volume keys (hold them as on the real one).");
     if (settings_.sendKeys) {
         ImGui::BulletText("What you type goes to iOS while a device is on screen.");
-        ImGui::BulletText("Ctrl+H: Home, Ctrl+P: Sleep/Wake, Ctrl with + and -: volume, Ctrl with the arrow keys: tilt.");
+        ImGui::BulletText("Ctrl+H: Home, Ctrl+P: Sleep/Wake, Ctrl with + and -: volume, Ctrl+R: rotate, "
+                          "Ctrl with the arrow keys: tilt.");
     } else {
-        ImGui::BulletText("H: Home, P: Sleep/Wake, + and -: volume, arrow keys: tilt.");
+        ImGui::BulletText("H: Home, P: Sleep/Wake, + and -: volume, R: rotate, arrow keys: tilt.");
         ImGui::BulletText("Type text into iOS with the box under the device.");
     }
     ImGui::BulletText("F11: fullscreen. F11 or Esc leaves it.");
@@ -1042,12 +1444,21 @@ std::vector<fs::path> LightTouchDevices(const std::vector<Device> &ours) {
     return found;
 }
 
+// Adding a device: a grid of the devices that can be emulated, then the chosen one's iOS versions
+// on a wheel. A preparation in progress (or just finished) takes over the page.
 void App::AddDevicePage() {
-    ImGui::Text("Add a device");
-    ImGui::Separator();
+    if (preparation_)
+        PreparationProgress();
+    else if (choosingVersion_)
+        VersionPicker();
+    else
+        DeviceGrid();
+}
 
-    // A preparation in progress (or just finished) takes over the page.
-    if (preparation_) {
+void App::PreparationProgress() {
+    FontText(g_titleFont, "Add a device");
+    ImGui::Separator();
+    {
         const Preparation::Status status = preparation_->GetStatus();
         const Firmware &firmware = preparation_->Request().firmware;
         ImGui::Text("Preparing %s, iOS %s%s", firmware.Product().c_str(), firmware.label.c_str(),
@@ -1065,148 +1476,255 @@ void App::AddDevicePage() {
                 preparation_.reset();
         } else {
             preparation_.reset();
+            choosingVersion_ = false;
             Reload();
             settings_.selected = status.deviceId;
             settings_.Save();
             page_ = Page::Device;
             notice_ = "The new device is ready. Press Start.";
         }
-        return;
     }
+}
 
-    const std::vector<Firmware> &catalog = Catalog();
-    const float listWidth = ImGui::GetFontSize() * 11;
-
-    // Column 1: the device.
-    ImGui::BeginChild("products", ImVec2(listWidth, 0), ImGuiChildFlags_Borders);
-    DimText("DEVICE");
-    std::string previous;
-    for (const auto &firmware : catalog) {
-        if (firmware.productType == previous)
+// Picks a device on the Add Device page and moves on to its versions, preselecting one that's
+// tested if there is one, else the newest.
+void App::ChooseProduct(const std::string &productType) {
+    chosenProduct_ = productType;
+    chosenFirmware_.clear();
+    int index = 0, chosenIndex = 0;
+    for (const auto &f : Catalog()) {
+        if (f.productType != chosenProduct_)
             continue;
-        previous = firmware.productType;
-        if (ImGui::Selectable((firmware.Product() + "##" + firmware.productType).c_str(),
-                              chosenProduct_ == firmware.productType)) {
-            chosenProduct_ = firmware.productType;
-            // Preselect a tested version if there is one, else the newest.
-            chosenFirmware_.clear();
-            for (const auto &f : catalog)
-                if (f.productType == chosenProduct_ && (chosenFirmware_.empty() || !FindFirmware(chosenFirmware_)->Tested()))
-                    chosenFirmware_ = f.id;
+        if (chosenFirmware_.empty() || !FindFirmware(chosenFirmware_)->Tested()) {
+            chosenFirmware_ = f.id;
+            chosenIndex = index;
         }
+        index++;
     }
-    ImGui::EndChild();
-    ImGui::SameLine();
+    drum_ = Drum{float(chosenIndex), float(chosenIndex)};
+    choosingVersion_ = !chosenFirmware_.empty();
+    newName_.clear();
+    localIpsw_.clear();
+}
 
-    // Column 2: its iOS versions.
-    const float versionsWidth = listWidth * 1.3f;
-    ImGui::BeginChild("versions", ImVec2(versionsWidth, 0), ImGuiChildFlags_Borders);
-    DimText("iOS VERSION");
-    for (const auto &firmware : catalog) {
-        if (firmware.productType != chosenProduct_)
-            continue;
-        const std::string label = firmware.label + "  (" + firmware.build + ")##" + firmware.id;
-        if (ImGui::Selectable(label.c_str(), chosenFirmware_ == firmware.id))
-            chosenFirmware_ = firmware.id;
-        if (firmware.Tested()) {
-            ImGui::SameLine(versionsWidth - ImGui::CalcTextSize("tested").x - 24);
-            ImGui::TextColored(kGood, "tested");
-        }
-    }
-    ImGui::EndChild();
-    ImGui::SameLine();
+// The first page of Add Device: every device that can be emulated, as tiles grouped by family.
+void App::DeviceGrid() {
+    FontText(g_titleFont, "Add a device");
+    DimText("Pick the device to emulate. Next, you choose its iOS version.");
+    ImGui::Spacing();
+    ImGui::BeginChild("grid", ImVec2(0, 0));
 
-    // Column 3: details and options.
-    ImGui::BeginChild("details", ImVec2(0, 0), ImGuiChildFlags_Borders);
-    if (const Firmware *firmware = FindFirmware(chosenFirmware_); !firmware || firmware->productType != chosenProduct_) {
-        DimText("Pick a device and an iOS version.");
-    } else {
-        ImGui::Text("%s, iOS %s", firmware->Product().c_str(), firmware->label.c_str());
-        DimText("Build " + firmware->build + ", released " + firmware->released);
-        if (firmware->Tested())
-            ImGui::TextColored(kGood, "Runs well (tested by LightTouch).");
-        else if (firmware->board == "n45ap" || firmware->board == "m68ap")
-            ImGui::TextColored(kWarn, "Experimental: this device currently stops at a white screen after setup.");
-        else
-            ImGui::TextColored(kWarn, "Not tested yet: it may or may not boot.");
-        ImGui::Spacing();
-        ImGui::BulletText("Download: %s from Apple (or a mirror)", FormatBytes(firmware->bytes).c_str());
-        ImGui::BulletText("Needs about %s free while preparing; the device then takes %s",
-                          FormatBytes(firmware->peakBytes).c_str(), FormatBytes(firmware->preparedBytes).c_str());
-        if (!firmware->sibling.empty())
-            ImGui::BulletText("Also downloads the IPSW of %s (for its data-protection setup)", firmware->sibling.c_str());
-        if (NeedsBootrom(firmware->board))
-            ImGui::BulletText("Also downloads this device's boot ROM");
-
-        ImGui::Spacing();
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16);
-        ImGui::InputTextWithHint("Name", firmware->Product().c_str(), &newName_);
-
-        const std::string noJailbreak = firmware->JailbreakUnavailable();
-        bool jailbreak = jailbreak_ && noJailbreak.empty();
-        ImGui::BeginDisabled(!noJailbreak.empty());
-        if (ImGui::Checkbox("Jailbreak (Cydia, apt, bash, root file access)", &jailbreak))
-            jailbreak_ = jailbreak;
-        ImGui::EndDisabled();
-        if (!noJailbreak.empty())
-            DimText(noJailbreak);
-        else if (jailbreak)
-            DimText("Cydia's files are downloaded while preparing. Turn on Internet when you run it.");
-
-        ImGui::Spacing();
-        if (localIpsw_.empty()) {
-            DimText("The IPSW is downloaded for you.");
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Use a file I have..."))
-                localIpsw_ = ChooseFile(L"iOS firmware (*.ipsw)\0*.ipsw\0All files\0*.*\0");
-        } else {
-            ImGui::TextWrapped("IPSW: %s", PathText(localIpsw_).c_str());
-            if (ImGui::SmallButton("Download it instead"))
-                localIpsw_.clear();
-        }
-
-        ImGui::Spacing();
-        if (ImGui::Button("Prepare", ImVec2(ImGui::GetFontSize() * 9, 0))) {
-            PrepareRequest request;
-            request.firmware = *firmware;
-            request.name = newName_;
-            request.jailbreak = jailbreak;
-            request.ipsw = localIpsw_;
-            preparation_ = std::make_unique<Preparation>(request);
-            newName_.clear();
-        }
+    // The catalog's devices in its order (oldest first), with the range of versions each runs.
+    struct Product {
+        std::string type, board, first, last;
+        int versions = 0;
+    };
+    std::vector<Product> products;
+    for (const auto &f : Catalog()) {
+        if (products.empty() || products.back().type != f.productType)
+            products.push_back({f.productType, f.board, f.label});
+        products.back().last = f.label;
+        products.back().versions++;
     }
 
-    // Devices LightTouch already made can be brought over as they are.
-    const std::vector<fs::path> lightTouch = LightTouchDevices(devices_);
-    if (!lightTouch.empty()) {
-        ImGui::Dummy(ImVec2(0, 16));
-        ImGui::Separator();
-        DimText("FROM LIGHTTOUCH");
-        for (const auto &dir : lightTouch) {
-            ImGui::PushID(PathText(dir).c_str());
-            std::string label = PathText(dir.filename());
-            try {
-                Device device = OpenDevice(dir);
-                label = device.name + " (" + device.Product() + ", iOS " + device.Version() + ")";
-            } catch (...) {
+    const float tile = std::floor(ImGui::GetFontSize() * 10.5f), tall = std::floor(tile * 1.32f);
+    const float gap = std::floor(ImGui::GetFontSize() * 0.9f);
+    const std::pair<const char *, const char *> families[] = {{"IPHONE", "iPhone"}, {"IPOD TOUCH", "iPod"}, {"IPAD", "iPad"}};
+    for (const auto &[heading, prefix] : families) {
+        DimText(heading);
+        const int perRow = std::max(1, int((ImGui::GetContentRegionAvail().x + gap) / (tile + gap)));
+        int column = 0;
+        for (const Product &product : products) {
+            if (product.type.rfind(prefix, 0) != 0)
+                continue;
+            if (column++ % perRow)
+                ImGui::SameLine(0, gap);
+            ImGui::PushID(product.type.c_str());
+            const bool clicked = ImGui::InvisibleButton("tile", ImVec2(tile, tall));
+            const bool hovered = ImGui::IsItemHovered();
+            ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+            if (hovered) {   // lifts a little under the mouse
+                min.y -= 3, max.y -= 3;
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
             }
-            ImGui::TextUnformatted(label.c_str());
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Import")) {
-                try {
-                    Device device = ImportDevice(dir);
-                    Reload();
-                    settings_.selected = device.id;
-                    page_ = Page::Device;
-                    notice_ = "Imported " + device.name + ".";
-                } catch (const std::exception &e) {
-                    error_ = e.what();
-                }
+            ImDrawList *draw = ImGui::GetWindowDrawList();
+            draw->AddRectFilled(min, max, hovered ? IM_COL32(44, 48, 57, 255) : IM_COL32(34, 37, 43, 255), 12);
+            if (hovered)
+                draw->AddRect(min, max, ImGui::GetColorU32(ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.7f)), 12, 0, 1.5f);
+            const float pad = tile * 0.08f;
+            if (Skin *skin = Skin::For(product.board)) {
+                const SkinLayout layout = skin->Fit(ImVec2(min.x + pad, min.y + pad), ImVec2(tile - 2 * pad, tall * 0.66f),
+                                                    Orientation::Portrait);
+                skin->Draw(draw, layout, [](int) { return false; }, -1, false);
+                skin->DrawGlare(draw, layout);
             }
+            auto centered = [&](const std::string &text, float y, ImU32 color) {
+                const ImVec2 size = ImGui::CalcTextSize(text.c_str());
+                draw->AddText(ImVec2(std::floor((min.x + max.x - size.x) / 2), y), color, text.c_str());
+            };
+            const float line = ImGui::GetTextLineHeight();
+            centered(ProductName(product.board), min.y + tall * 0.66f + pad * 1.6f, ImGui::GetColorU32(ImGuiCol_Text));
+            centered(product.first == product.last ? "iOS " + product.first : "iOS " + product.first + " to " + product.last,
+                     min.y + tall * 0.66f + pad * 1.6f + line + 2, ImGui::GetColorU32(kDim));
+            centered(std::to_string(product.versions) + (product.versions == 1 ? " version" : " versions"),
+                     min.y + tall * 0.66f + pad * 1.6f + 2 * line + 4, ImGui::GetColorU32(kDim));
+            if (clicked)
+                ChooseProduct(product.type);
             ImGui::PopID();
         }
+        ImGui::Dummy(ImVec2(0, gap / 2));
     }
+    LightTouchImports();
+    ImGui::EndChild();
+}
+
+// Devices LightTouch already made can be brought over as they are.
+void App::LightTouchImports() {
+    const std::vector<fs::path> lightTouch = LightTouchDevices(devices_);
+    if (lightTouch.empty())
+        return;
+    ImGui::Separator();
+    DimText("FROM LIGHTTOUCH");
+    for (const auto &dir : lightTouch) {
+        ImGui::PushID(PathText(dir).c_str());
+        std::string label = PathText(dir.filename());
+        try {
+            Device device = OpenDevice(dir);
+            label = device.name + " (" + device.Product() + ", iOS " + device.Version() + ")";
+        } catch (...) {
+        }
+        ImGui::TextUnformatted(label.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Import")) {
+            try {
+                Device device = ImportDevice(dir);
+                Reload();
+                settings_.selected = device.id;
+                page_ = Page::Device;
+                notice_ = "Imported " + device.name + ".";
+            } catch (const std::exception &e) {
+                error_ = e.what();
+            }
+        }
+        ImGui::PopID();
+    }
+}
+
+// The second page of Add Device: the chosen device, a wheel of its iOS versions, and the options.
+void App::VersionPicker() {
+    std::vector<const Firmware *> versions;
+    for (const auto &f : Catalog())
+        if (f.productType == chosenProduct_)
+            versions.push_back(&f);
+    if (versions.empty()) {
+        choosingVersion_ = false;
+        return;
+    }
+    if (ImGui::Button(g_icons ? (std::string(icon::kLeft) + "  All devices").c_str() : "<  All devices")) {
+        choosingVersion_ = false;
+        return;
+    }
+    ImGui::SameLine();
+    FontText(g_titleFont, ProductName(versions[0]->board));
+    ImGui::Separator();
+
+    int index = 0;
+    for (size_t i = 0; i < versions.size(); i++)
+        if (versions[i]->id == chosenFirmware_)
+            index = int(i);
+
+    // Left: the device, with the chosen version on its glass.
+    const float artWidth = std::max(ImGui::GetContentRegionAvail().x * 0.36f, ImGui::GetFontSize() * 13);
+    ImGui::BeginChild("art", ImVec2(artWidth, 0), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    if (Skin *skin = Skin::For(versions[0]->board)) {
+        ImDrawList *draw = ImGui::GetWindowDrawList();
+        const ImVec2 origin = ImGui::GetCursorScreenPos(), area = ImGui::GetContentRegionAvail();
+        const SkinLayout layout = skin->Fit(ImVec2(origin.x + 8, origin.y + 8), ImVec2(area.x - 16, area.y - 16),
+                                            Orientation::Portrait);
+        skin->Draw(draw, layout, [](int) { return false; });
+        const std::string text = "iOS " + versions[index]->label;
+        ImFont *font = g_largeFont ? g_largeFont : ImGui::GetFont();
+        const ImVec2 size = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0, text.c_str());
+        draw->AddText(font, font->FontSize,
+                      ImVec2(std::floor((layout.screenMin.x + layout.screenMax.x - size.x) / 2),
+                             std::floor((layout.screenMin.y + layout.screenMax.y - size.y) / 2)),
+                      IM_COL32(150, 154, 162, 255), text.c_str());
+        skin->DrawGlare(draw, layout);
+    }
+    ImGui::EndChild();
+    ImGui::SameLine();
+
+    // Right: the wheel, then what the chosen version needs and the options.
+    ImGui::BeginChild("choose", ImVec2(0, 0));
+    DimText("iOS VERSION");
+    std::vector<WheelRow> rows;
+    for (const Firmware *f : versions)
+        rows.push_back({"iOS " + f->label, f->build, f->Tested()});
+    const float wheelWidth = std::min(ImGui::GetContentRegionAvail().x, ImGui::GetFontSize() * 22);
+    DrumPicker("versions", rows, index, drum_, wheelWidth);
+    const Firmware *firmware = versions[index];
+    chosenFirmware_ = firmware->id;
+    ImGui::Spacing();
+    ImGui::Text("iOS %s", firmware->label.c_str());
+    ImGui::SameLine();
+    DimText("build " + firmware->build + ", released " + firmware->released);
+    if (firmware->Tested())
+        ImGui::TextColored(kGood, "Runs well (tested by LightTouch).");
+    else if (firmware->board == "n45ap" || firmware->board == "m68ap")
+        ImGui::TextColored(kWarn, "Experimental: this device currently stops at a white screen after setup.");
+    else
+        ImGui::TextColored(kWarn, "Not tested yet: it may or may not boot.");
+    ImGui::Spacing();
+    if (firmware->storageGb)
+        ImGui::BulletText("Storage: %d GB (the emulated hardware's, the same for every version)", firmware->storageGb);
+    ImGui::BulletText("Download: %s from Apple (or a mirror)", FormatBytes(firmware->bytes).c_str());
+    ImGui::BulletText("Needs about %s free while preparing; the device then takes %s",
+                      FormatBytes(firmware->peakBytes).c_str(), FormatBytes(firmware->preparedBytes).c_str());
+    if (!firmware->sibling.empty())
+        ImGui::BulletText("Also downloads the IPSW of %s (for its data-protection setup)", firmware->sibling.c_str());
+    if (NeedsBootrom(firmware->board))
+        ImGui::BulletText("Also downloads this device's boot ROM");
+
+    ImGui::Spacing();
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16);
+    ImGui::InputTextWithHint("Name", firmware->Product().c_str(), &newName_);
+
+    const std::string noJailbreak = firmware->JailbreakUnavailable();
+    bool jailbreak = jailbreak_ && noJailbreak.empty();
+    ImGui::BeginDisabled(!noJailbreak.empty());
+    if (ImGui::Checkbox("Jailbreak (Cydia, apt, bash, root file access)", &jailbreak))
+        jailbreak_ = jailbreak;
+    ImGui::EndDisabled();
+    if (!noJailbreak.empty())
+        DimText(noJailbreak);
+    else if (jailbreak)
+        DimText("Cydia's files are downloaded while preparing. Turn on Internet when you run it.");
+
+    ImGui::Spacing();
+    if (localIpsw_.empty()) {
+        DimText("The IPSW is downloaded for you.");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Use a file I have..."))
+            localIpsw_ = ChooseFile(L"iOS firmware (*.ipsw)\0*.ipsw\0All files\0*.*\0");
+    } else {
+        ImGui::TextWrapped("IPSW: %s", PathText(localIpsw_).c_str());
+        if (ImGui::SmallButton("Download it instead"))
+            localIpsw_.clear();
+    }
+
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.42f, 0.78f, 1));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.26f, 0.50f, 0.88f, 1));
+    if (ImGui::Button("Prepare", ImVec2(ImGui::GetFontSize() * 9, 0))) {
+        PrepareRequest request;
+        request.firmware = *firmware;
+        request.name = newName_;
+        request.jailbreak = jailbreak;
+        request.ipsw = localIpsw_;
+        preparation_ = std::make_unique<Preparation>(request);
+        newName_.clear();
+    }
+    ImGui::PopStyleColor(2);
     ImGui::EndChild();
 }
 
@@ -1585,9 +2103,11 @@ void App::ClosingOverlay() {
 // ---- Window and OpenGL -----------------------------------------------------------------------
 
 // For testing the UI where nobody watches the screen: IOS_EMULATOR_UI_START=1 starts the selected
-// device (IOS_EMULATOR_UI_FULLSCREEN=1 also shows it fullscreen), IOS_EMULATOR_UI_PAGE=add opens the
-// Add Device page, and IOS_EMULATOR_UI_SHOT=<file.png> saves the window after IOS_EMULATOR_UI_SHOT_AFTER
-// seconds (default 5) and closes the app.
+// device (IOS_EMULATOR_UI_FULLSCREEN=1 also shows it fullscreen, IOS_EMULATOR_UI_LANDSCAPE=1 turns
+// it, IOS_EMULATOR_UI_DEVTOOLS=1 shows the developer tools without saving that), IOS_EMULATOR_UI_PAGE=add
+// opens the Add Device page (IOS_EMULATOR_UI_PRODUCT=<product type>, e.g. iPhone3,1, goes straight to
+// that device's versions), and IOS_EMULATOR_UI_SHOT=<file.png> saves the window after
+// IOS_EMULATOR_UI_SHOT_AFTER seconds (default 5) and closes the app.
 std::string EnvText(const char *name) {
     const char *value = getenv(name);
     return value ? value : "";
@@ -1716,8 +2236,23 @@ int RunUi() {
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
     io.IniFilename = nullptr;   // nothing to remember about window layout
-    if (fs::exists("C:\\Windows\\Fonts\\segoeui.ttf"))
-        io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 17.0f * scale);
+    // Segoe UI, with the icons of Segoe MDL2 Assets merged in; a large size for the version wheel,
+    // and Segoe UI Semibold for titles.
+    const fs::path fonts = "C:\\Windows\\Fonts";
+    if (fs::exists(fonts / "segoeui.ttf")) {
+        io.Fonts->AddFontFromFileTTF(PathText(fonts / "segoeui.ttf").c_str(), 17.0f * scale);
+        if (fs::exists(fonts / "segmdl2.ttf")) {
+            static const ImWchar icons[] = {0xE700, 0xE9FF, 0};
+            ImFontConfig merge;
+            merge.MergeMode = true;
+            merge.PixelSnapH = true;
+            merge.GlyphOffset = ImVec2(0, 3.0f * scale);   // MDL2 sits high next to Segoe UI's letters
+            g_icons = io.Fonts->AddFontFromFileTTF(PathText(fonts / "segmdl2.ttf").c_str(), 15.0f * scale, &merge, icons);
+        }
+        g_largeFont = io.Fonts->AddFontFromFileTTF(PathText(fonts / "segoeui.ttf").c_str(), 25.0f * scale);
+        const fs::path semibold = fs::exists(fonts / "seguisb.ttf") ? fonts / "seguisb.ttf" : fonts / "segoeui.ttf";
+        g_titleFont = io.Fonts->AddFontFromFileTTF(PathText(semibold).c_str(), 22.0f * scale);
+    }
     SetupStyle(scale);
     ImGui_ImplWin32_InitForOpenGL(hwnd);
     ImGui_ImplOpenGL3_Init();
@@ -1735,6 +2270,12 @@ int RunUi() {
             app.EnterFullscreen();
         if (EnvText("IOS_EMULATOR_UI_PAGE") == "add")
             app.ShowAddDevice();
+        if (!EnvText("IOS_EMULATOR_UI_PRODUCT").empty())
+            app.ShowAddDevice(EnvText("IOS_EMULATOR_UI_PRODUCT"));
+        if (EnvText("IOS_EMULATOR_UI_LANDSCAPE") == "1")
+            app.SetLandscape();
+        if (EnvText("IOS_EMULATOR_UI_DEVTOOLS") == "1")
+            app.ShowDevTools(true);
         bool shotTaken = false, fullscreen = false;
         while (!app.Finished()) {
             // Idle politely: with no device running, wait for input (or a periodic refresh).

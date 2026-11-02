@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- iPhone (original): front view, in tenths of a millimetre (61.0 x 115.0 mm body).
+     Device art for iOS Emulator (src/skin.h). Element ids it reads, matched up to the first ".":
+       body          the outline of the device (pressed side buttons sink into it)
+       screen        exactly the panel; the running device's picture covers it
+       home, power, volume-up, volume-down   the buttons that work (only those this device has)
+       glare         a faint reflection drawn over the picture
+     Everything else is decoration. Drawn with nanosvg: no filters, masks, clip paths, text or <use>. -->
+
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 730 1270" width="730" height="1270">
+<defs>
+<linearGradient id="rim" gradientUnits="userSpaceOnUse" x1="60" y1="60" x2="670" y2="1210"><stop offset="0" stop-color="#5c5d61"/><stop offset="0.1" stop-color="#e8e9ed"/><stop offset="0.2" stop-color="#8a8b90"/><stop offset="0.34" stop-color="#f8f8fa"/><stop offset="0.47" stop-color="#9fa0a5"/><stop offset="0.6" stop-color="#eeeef2"/><stop offset="0.74" stop-color="#727378"/><stop offset="0.87" stop-color="#dcdde1"/><stop offset="1" stop-color="#606166"/></linearGradient>
+<linearGradient id="btn-h" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#1c1c1e"/><stop offset="0.45" stop-color="#3a3a3d"/><stop offset="0.55" stop-color="#2e2e31"/><stop offset="1" stop-color="#151517"/></linearGradient>
+<linearGradient id="btn-v" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1c1c1e"/><stop offset="0.45" stop-color="#3a3a3d"/><stop offset="0.55" stop-color="#2e2e31"/><stop offset="1" stop-color="#151517"/></linearGradient>
+<linearGradient id="glass" x1="0" y1="0" x2="0.35" y2="1"><stop offset="0" stop-color="#1d1e21"/><stop offset="0.5" stop-color="#101113"/><stop offset="1" stop-color="#08080a"/></linearGradient>
+<linearGradient id="panel" x1="0" y1="0" x2="0.4" y2="1"><stop offset="0" stop-color="#0d0e11"/><stop offset="1" stop-color="#040405"/></linearGradient>
+<radialGradient id="home-dish" cx="0.5" cy="0.42" r="0.6"><stop offset="0" stop-color="#0b0b0c"/><stop offset="0.75" stop-color="#151517"/><stop offset="1" stop-color="#26262a"/></radialGradient>
+<radialGradient id="lens" cx="0.4" cy="0.4" r="0.6"><stop offset="0" stop-color="#28324a"/><stop offset="0.5" stop-color="#0c0f18"/><stop offset="1" stop-color="#030304"/></radialGradient>
+<linearGradient id="grille" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#050506"/><stop offset="1" stop-color="#2a2b2f"/></linearGradient>
+<linearGradient id="sheen" x1="0" y1="0" x2="0.9" y2="0.55"><stop offset="0" stop-color="#ffffff" stop-opacity="0.09"/><stop offset="0.45" stop-color="#ffffff" stop-opacity="0.025"/><stop offset="0.46" stop-color="#ffffff" stop-opacity="0"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></linearGradient>
+<linearGradient id="shine" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></linearGradient>
+</defs>
+<g id="shadow">
+<rect x="18" y="32" width="694" height="1234" rx="134" ry="134" fill="#000000" fill-opacity="0.045"/>
+<rect x="24" y="38" width="682" height="1222" rx="128" ry="128" fill="#000000" fill-opacity="0.045"/>
+<rect x="30" y="44" width="670" height="1210" rx="122" ry="122" fill="#000000" fill-opacity="0.045"/>
+<rect x="36" y="50" width="658" height="1198" rx="116" ry="116" fill="#000000" fill-opacity="0.045"/>
+<rect x="42" y="56" width="646" height="1186" rx="110" ry="110" fill="#000000" fill-opacity="0.045"/>
+<rect x="48" y="62" width="634" height="1174" rx="104" ry="104" fill="#000000" fill-opacity="0.045"/>
+<rect x="54" y="68" width="622" height="1162" rx="98" ry="98" fill="#000000" fill-opacity="0.045"/>
+</g>
+<g id="power"><rect x="455" y="46" width="120" height="44" rx="8" ry="8" fill="url(#btn-v)" stroke="#000000" stroke-opacity="0.35" stroke-width="1.5"/><rect x="463" y="48" width="104" height="3" rx="1.5" ry="1.5" fill="#ffffff" fill-opacity="0.35"/></g>
+<g id="volume-up"><rect x="46" y="288" width="44" height="88" rx="8" ry="8" fill="url(#btn-h)" stroke="#000000" stroke-opacity="0.35" stroke-width="1.5"/><rect x="48" y="296" width="3" height="72" rx="1.5" ry="1.5" fill="#ffffff" fill-opacity="0.35"/></g>
+<g id="volume-down"><rect x="46" y="380" width="44" height="88" rx="8" ry="8" fill="url(#btn-h)" stroke="#000000" stroke-opacity="0.35" stroke-width="1.5"/><rect x="48" y="388" width="3" height="72" rx="1.5" ry="1.5" fill="#ffffff" fill-opacity="0.35"/></g>
+<g id="switch0"><rect x="46" y="200" width="44" height="50" rx="8" ry="8" fill="url(#btn-h)" stroke="#000000" stroke-opacity="0.35" stroke-width="1.5"/><rect x="48" y="208" width="3" height="34" rx="1.5" ry="1.5" fill="#ffffff" fill-opacity="0.35"/></g>
+<rect x="60" y="60" width="610" height="1150" rx="92" ry="92" id="body" fill="url(#rim)"/>
+<rect x="62.5" y="62.5" width="605" height="1145" rx="89.5" ry="89.5" id="rim.edge" fill="none" stroke="#ffffff" stroke-opacity="0.45" stroke-width="2"/>
+<rect x="82.5" y="82.5" width="565" height="1105" rx="69.5" ry="69.5" id="rim.seam" fill="#000000" fill-opacity="0.55"/>
+<rect x="84" y="84" width="562" height="1102" rx="68" ry="68" id="face" fill="url(#glass)"/>
+<rect x="86" y="86" width="558" height="1098" rx="66" ry="66" id="face.edge" fill="none" stroke="#ffffff" stroke-opacity="0.07" stroke-width="2"/>
+<rect x="84" y="84" width="562" height="1102" rx="68" ry="68" id="face.sheen" fill="url(#sheen)"/>
+<rect x="304" y="151.5" width="122" height="19" rx="9.5" ry="9.5" id="earpiece.rim" fill="#3a3b3f"/>
+<rect x="306" y="153.5" width="118" height="15" rx="7.5" ry="7.5" id="earpiece" fill="url(#grille)"/>
+<rect x="108.5" y="254" width="513" height="762" rx="2" ry="2" id="lcd" fill="#060607" stroke="#232428" stroke-opacity="0.7" stroke-width="1.5"/>
+<rect id="screen" x="115.5" y="261" width="499" height="748" fill="url(#panel)"/>
+<g id="home">
+<circle cx="365" cy="1116" r="53" fill="url(#home-dish)" stroke="#3b3b40" stroke-width="2.5"/>
+<circle cx="365" cy="1116" r="50" fill="none" stroke="#000000" stroke-opacity="0.6" stroke-width="2"/>
+<rect x="346.98" y="1097.98" width="36.04" height="36.04" rx="7.42" ry="7.42" fill="none" stroke="#8c8c92" stroke-width="3.392"/>
+</g>
+<path id="glare" d="M115.5,261 L574.58,261 L115.5,724.76 Z" fill="url(#shine)" fill-opacity="0.5"/>
+</svg>

@@ -10,7 +10,12 @@
 // Commands (UI -> worker), each a JSON object with a "cmd" field:
 //   {"cmd":"touch","contacts":[{"id":1,"phase":0,"x":0.5,"y":0.5}]}   phase: 0 down, 1 move, 2 up, 3 cancel
 //   {"cmd":"button","button":0,"down":true}                           0 Home, 1 Sleep/Wake, 2 Vol+, 3 Vol-
-//   {"cmd":"motion","x":0,"y":0,"z":9.8}                              accelerometer, m/s^2, portrait axes
+//   {"cmd":"motion","x":0,"y":0,"z":9.8}      accelerometer, m/s^2, portrait axes (x right, y up, z out of
+//                                             the screen; at rest it points up: lying flat is z 9.8, standing
+//                                             upright y 9.8, on its side with Home right x 9.8). The worker
+//                                             repeats the last sample until the next one (the engine
+//                                             drops a sample after 250 ms); one sent before iOS is up
+//                                             applies once it is
 //   {"cmd":"type","text":"hello\n"}      types into the text field that has focus, through it_typein
 //                                        (the guest tools' typing library); "\b" deletes a character,
 //                                        "\n" is a line break (Return in a one-line field)

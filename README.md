@@ -31,11 +31,13 @@ The program finds the `resources` folder next to it or in a parent folder, so it
 
 ## Using it
 
-1. **Add a device**: pick a device and an iOS version (versions marked *tested* run best; the iPod touch
-   2G on 3.1.3 is the fastest). Leave **Jailbreak** on to get Cydia, apt, bash and root file access.
-   The app downloads the IPSW and prepares the device; it takes one to a few minutes.
-   Devices made by LightTouch can be imported from the same page.
-2. **Start** it. The mouse is your finger:
+1. **Add a device**: pick the device from the grid, then turn the wheel to an iOS version (a green dot
+   marks versions tested to run well; the iPod touch 2G on 3.1.3 is the fastest). Leave **Jailbreak** on
+   to get Cydia, apt, bash and root file access. The app downloads the IPSW and prepares the device; it
+   takes one to a few minutes. Devices made by LightTouch can be imported from the bottom of the grid.
+2. **Start** it (or press the pictured device's Sleep/Wake button). The device is drawn as it looked,
+   and its buttons work: click Home, Sleep/Wake or the volume keys, and hold them as on the real one.
+   The mouse is your finger:
 
    | Input | Does |
    | --- | --- |
@@ -43,16 +45,19 @@ The program finds the `resources` folder next to it or in a parent folder, so it
    | Alt + drag | Pinch or rotate with two fingers |
    | H / P | Home / Sleep-Wake (held while the key is) |
    | + / - | Volume |
+   | R, or the Rotate button | Portrait or landscape: the device turns, and apps that support landscape turn with it |
    | Arrow keys | Tilt the device (for games steered by tilting) |
    | The box under the device | Types text into iOS |
    | F11 | Fullscreen (F11 or Esc leaves it) |
 
+   The toolbar under the device has Rotate, Pause, Screenshot, Fullscreen, Sound, Internet, Web proxy and
+   Stop; hover a button to see what it does.
 3. **Stop** shuts iOS down cleanly, like sliding to power off. Each device keeps its own storage; the
    prepared system is never changed, and **Erase** brings a device back to it.
 
 **Fullscreen** (the button or F11) shows only the device's screen, as large as the monitor allows.
-Moving the mouse brings up controls for volume, Home, Sleep/Wake and leaving fullscreen; they fade
-out a few seconds after the mouse stops.
+Moving the mouse brings up controls for volume, Home, Sleep/Wake, Rotate and leaving fullscreen; they
+fade out a few seconds after the mouse stops.
 
 **Typing**: tap a text field in iOS, then type in the box under the device. The text goes straight
 into the field through `it_typein`, a small library the guest tools load into every app (iOS 3 to 7),
@@ -75,7 +80,8 @@ network.
 
 ## Developer tools
 
-While a device runs, the panel beside it has:
+While a device runs, the tab at its right edge shows or hides the developer tools (hidden at first;
+the app remembers your choice). The panel has:
 
 | Tab | What it does |
 | --- | --- |
@@ -157,7 +163,8 @@ iOS-Emulator.exe (the window)                 iOS-Emulator.exe --worker (one per
 | File | What it does |
 | --- | --- |
 | `src/main.cpp` | Entry point and the command-line modes |
-| `src/ui.cpp` | The window: device list, screen and controls, fullscreen, Add Device page, developer panel, settings |
+| `src/ui.cpp` | The window: device list, the device and its toolbar, fullscreen, Add Device (grid and version wheel), developer panel, settings |
+| `src/skin.cpp` | The pictured devices: draws `resources\skins\*.svg` (with nanosvg), turned for landscape, with working buttons |
 | `src/session.cpp` | A running device as the window sees it: starts the helpers, reads frames and events |
 | `src/worker.cpp` | The worker process: runs the engine, sound, commands, typing (through `it_typein`) |
 | `src/engine.cpp` | The engine's C API and each board's boot command line |
@@ -181,7 +188,8 @@ Built on [LightTouch](https://github.com/blake-lucas/LightTouch) by Blake Lucas 
 guest tools and firmware catalog, in `resources\`), [qemu-ios](https://github.com/blake-lucas/qemu-ios),
 [QEMU](https://www.qemu.org), [libimobiledevice](https://libimobiledevice.org),
 [Dear ImGui](https://github.com/ocornut/imgui) and [OpenSSL](https://www.openssl.org), with
-[nlohmann/json](https://github.com/nlohmann/json).
+[nlohmann/json](https://github.com/nlohmann/json) and [nanosvg](https://github.com/memononen/nanosvg).
+The device pictures in `resources\skins` are drawn for this project from the devices' published dimensions.
 The licenses of the bundled components are in `resources\licenses` and `third_party`.
 
 Like LightTouch, this program is free software under the GNU GPL, version 2 or (at your option) any

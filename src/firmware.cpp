@@ -64,6 +64,8 @@ const std::vector<Firmware> &Catalog() {
             f.preparedBytes = estimates.value("prepared_bytes", uint64_t(0));
             f.peakBytes = estimates.value("peak_bytes", uint64_t(0));
             f.sibling = entry.at("recipe").value("keybag_ramdisk_from", "");
+            if (std::string storage = entry.at("recipe").value("storage", ""); !storage.empty())   // "16g"
+                f.storageGb = atoi(storage.c_str());
             list.push_back(f);
         }
         // Devices in the order they came out, each one's versions oldest first.

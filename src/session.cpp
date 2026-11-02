@@ -250,8 +250,8 @@ void Session::HandleEvent(const Json &event) {
         paused = state == "paused";
         sleeping = event.value("sleeping", false);
         agent = event.value("agent", 0);
-    } else if (kind == "reply") {
-        auto found = pending_.find(event.value("id", uint64_t(0)));
+    } else if (kind == "reply" && event.contains("id") && event["id"].is_number_unsigned()) {
+        auto found = pending_.find(event["id"].get<uint64_t>());
         if (found != pending_.end()) {
             auto callback = std::move(found->second);
             pending_.erase(found);

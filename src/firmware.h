@@ -26,6 +26,7 @@ struct Firmware {
     uint64_t preparedBytes = 0;      // disk space the prepared device takes
     uint64_t peakBytes = 0;          // disk space needed while preparing
     std::string sibling;             // another firmware whose IPSW is also needed (its keybag ramdisk)
+    int storageGb = 0;               // the emulated flash storage (fixed per board), 0 if unknown
 
     std::string FileName() const { return productType + "_" + version + "_" + build + "_Restore.ipsw"; }
     std::string Product() const { return ProductName(board); }
