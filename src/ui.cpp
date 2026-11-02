@@ -128,7 +128,9 @@ struct Texture {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
         if (w != width || h != height) {
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, bgra.data());
+            // GL_RGB drops the guest's alpha channel, which isn't meaningful (iOS 3.x leaves it at 0):
+            // kept, it would make the screen transparent, showing the bezel through it.
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, bgra.data());
             width = w;
             height = h;
         } else {
