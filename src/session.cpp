@@ -262,6 +262,11 @@ void Session::HandleEvent(const Json &event) {
         proxyError = event.value("error", false);
     } else if (kind == "typing") {
         typingProblem = event.value("message", "");
+    } else if (kind == "recording") {
+        recording = event.value("on", false);
+        recordingSince = NowNs();
+        recordingSaved = event.value("file", "");
+        recordingError = event.value("error", "");
     } else if (kind == "progress") {
         progress = event.value("text", "");
     } else if (kind == "log") {

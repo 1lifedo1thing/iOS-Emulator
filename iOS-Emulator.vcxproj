@@ -55,10 +55,11 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <!-- Record only the .pdb's file name in the exe, not the full build path. -->
       <AdditionalOptions>/PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalDependencies>opengl32.lib;winhttp.lib;winmm.lib;ws2_32.lib;bcrypt.lib;shell32.lib;comdlg32.lib;delayimp.lib;libimobiledevice-1.0.lib;libplist-2.0.lib;libusbmuxd-2.0.lib;libssl-3-x64.lib;libcrypto-3-x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>opengl32.lib;winhttp.lib;winmm.lib;ws2_32.lib;bcrypt.lib;shell32.lib;comdlg32.lib;delayimp.lib;libimobiledevice-1.0.lib;libplist-2.0.lib;libusbmuxd-2.0.lib;libssl-3-x64.lib;libcrypto-3-x64.lib;mfplat.lib;mfreadwrite.lib;mfuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ProjectDir)third_party\libimobiledevice\lib;$(ProjectDir)third_party\openssl\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <!-- The USB and OpenSSL libraries live in resources\ and load on first use (main.cpp points the DLL search there). -->
-      <DelayLoadDLLs>libimobiledevice-1.0.dll;libplist-2.0.dll;libusbmuxd-2.0.dll;libssl-3-x64.dll;libcrypto-3-x64.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+      <!-- The USB and OpenSSL libraries live in resources\ and load on first use (main.cpp points the DLL search there).
+           Media Foundation is Windows' own, but "N" editions lack it: recorder.cpp checks before using it. -->
+      <DelayLoadDLLs>libimobiledevice-1.0.dll;libplist-2.0.dll;libusbmuxd-2.0.dll;libssl-3-x64.dll;libcrypto-3-x64.dll;mfplat.dll;mfreadwrite.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
     <Manifest>
       <AdditionalManifestFiles>$(ProjectDir)src\app.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>
@@ -86,6 +87,7 @@
     <ClCompile Include="src\library.cpp" />
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\proxy.cpp" />
+    <ClCompile Include="src\recorder.cpp" />
     <ClCompile Include="src\services.cpp" />
     <ClCompile Include="src\session.cpp" />
     <ClCompile Include="src\skin.cpp" />
@@ -106,6 +108,7 @@
     <ClInclude Include="src\firmware.h" />
     <ClInclude Include="src\library.h" />
     <ClInclude Include="src\proxy.h" />
+    <ClInclude Include="src\recorder.h" />
     <ClInclude Include="src\services.h" />
     <ClInclude Include="src\session.h" />
     <ClInclude Include="src\skin.h" />

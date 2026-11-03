@@ -3,6 +3,7 @@
 #include "engine.h"
 #include "library.h"
 #include "proxy.h"
+#include "recorder.h"
 #include "services.h"
 #include "snapshot.h"
 
@@ -155,6 +156,8 @@ private:
     void StartWebProxy(BootOptions &options);
     void UpdateWebProxy();
     void TrustWebProxy();
+    void StartRecording(const fs::path &file, bool landscape);
+    void StopRecording();
     Json SaveSnapshot(const std::string &name);
     AgentReply Agent(const std::string &op, const std::string &argument, const std::string &body,
                      std::chrono::milliseconds timeout = 30s);
@@ -202,6 +205,9 @@ private:
 
     std::unique_ptr<WebProxy> proxy_;        // the guest's web proxy (proxy.h); null if it couldn't start
     std::atomic<bool> trusting_{false};      // its certificate is installed in iOS, or being installed
+
+    std::mutex recorderMutex_;               // guards recorder_, which the frame and sound threads feed
+    std::unique_ptr<Recorder> recorder_;     // the screen recording under way (recorder.h), if any
 
     std::mutex typingMutex_;                 // text the "type" commands queued, not yet typed
     std::condition_variable typingReady_;
@@ -287,6 +293,7 @@ int Worker::Run() {
     guest.join();
     publisher.join();
     audio.join();
+    StopRecording();   // iOS shut itself down: what was recorded is still saved
 
     const bool storageFailed = engine_->storageFailed();
     const bool throwaway = !snapshot_.empty();   // its state is discarded: no iOS shutdown needed
@@ -325,6 +332,11 @@ void Worker::PublishThread() {
             continue;
         PublishFrame();
         SendStatusIfChanged();
+        {
+            std::lock_guard<std::mutex> lock(recorderMutex_);
+            if (recorder_)
+                recorder_->Blank(engine_->displaySleeping());
+        }
         if (std::chrono::steady_clock::now() - motionSent >= 100ms) {   // keep the last motion sample alive
             motionSent = std::chrono::steady_clock::now();
             std::lock_guard<std::mutex> lock(motionMutex_);
@@ -360,6 +372,49 @@ void Worker::PublishFrame() {
     frame->stride = meta.stride;
     memcpy(frame->Pixels(), scratch_.data(), size_t(meta.stride) * meta.height);
     frame->sequence.fetch_add(1, std::memory_order_release);   // even: a complete frame
+    std::lock_guard<std::mutex> lock(recorderMutex_);
+    if (recorder_)
+        recorder_->Frame(scratch_.data(), int(meta.width), int(meta.height), int(meta.stride));
+}
+
+// Runs on the command thread: starting takes a moment, and it mustn't wait behind a slow background
+// request like an app install. The "recording" event tells the UI how it went.
+void Worker::StartRecording(const fs::path &file, bool landscape) {
+    if (std::lock_guard<std::mutex> lock(recorderMutex_); recorder_)
+        return;
+    try {
+        // The recording starts with the screen as it is now, however long it then stands still.
+        std::vector<uint8_t> pixels;
+        int width = 0, height = 0;
+        uint64_t seen = ~uint64_t(0);
+        for (int tries = 0; tries < 50 && !frames_.Read(seen, pixels, width, height); tries++)
+            std::this_thread::sleep_for(2ms);
+        if (width == 0)
+            throw std::runtime_error("There's no screen to record yet.");
+        auto recorder = std::make_unique<Recorder>(file, width, height, landscape);
+        recorder->Frame(pixels.data(), width, height, width * 4);
+        recorder->Blank(engine_->displaySleeping());
+        std::lock_guard<std::mutex> lock(recorderMutex_);
+        recorder_ = std::move(recorder);
+        Send({{"event", "recording"}, {"on", true}});
+    } catch (const std::exception &e) {
+        Send({{"event", "recording"}, {"on", false}, {"error", e.what()}});
+    }
+}
+
+void Worker::StopRecording() {
+    std::unique_ptr<Recorder> recorder;
+    {
+        std::lock_guard<std::mutex> lock(recorderMutex_);
+        recorder.swap(recorder_);
+    }
+    if (!recorder)
+        return;
+    const std::string error = recorder->Finish();
+    if (error.empty())
+        Send({{"event", "recording"}, {"on", false}, {"file", PathText(recorder->File())}});
+    else
+        Send({{"event", "recording"}, {"on", false}, {"error", error}});
 }
 
 void Worker::SendStatusIfChanged() {
@@ -402,6 +457,9 @@ void Worker::AudioThread() {
         }
         if (!muted_)
             player.Play(packet.data(), size_t(bytes));
+        std::lock_guard<std::mutex> lock(recorderMutex_);
+        if (recorder_)
+            recorder_->Sound(packet.data(), size_t(bytes));
     }
     if (generation)
         engine_->audioStop(generation);
@@ -487,8 +545,14 @@ void Worker::HandleCommand(const Json &command) {
     const bool ready = engine_ && engine_->ready() && !done_;
 
     if (cmd == "stop") {
+        StopRecording();
         if (!stopping_.exchange(true))
             std::thread(&Worker::Shutdown, this).detach();
+    } else if (cmd == "record") {
+        if (!command.contains("to"))
+            StopRecording();
+        else if (ready)
+            StartRecording(fs::path(Widen(command.value("to", ""))), command.value("landscape", false));
     } else if (cmd == "touch" && ready) {
         std::vector<QemuIosPortableContact> contacts;
         for (const auto &c : command.at("contacts")) {

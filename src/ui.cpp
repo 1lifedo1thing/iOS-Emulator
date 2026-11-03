@@ -222,19 +222,23 @@ const char *const kRotate = "", *const kPause = "", *const kPlay = "", 
                   *const kFullscreen = "", *const kVolume = "", *const kMute = "",
                   *const kGlobe = "", *const kLock = "", *const kStop = "", *const kCode = "",
                   *const kLeft = "", *const kRight = "";
+const char *const kRecord = "\xEE\x9F\x88";   // U+E7C8
 }
 
-// A toolbar button: its icon (or `name`, without the icon font), drawn highlighted while `on`.
-bool IconButton(const char *icon, const char *name, const std::string &tip, bool on = false) {
+// A toolbar button: its icon (or `name`, without the icon font), drawn highlighted while `on`, and in
+// `ink` when one is given.
+bool IconButton(const char *icon, const char *name, const std::string &tip, bool on = false,
+                const ImVec4 *ink = nullptr) {
     if (on) {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.19f, 0.33f, 0.56f, 1));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.40f, 0.66f, 1));
     }
+    if (ink)
+        ImGui::PushStyleColor(ImGuiCol_Text, *ink);
     ImGui::PushID(name);
     const bool clicked = g_icons ? ImGui::Button(icon, ImVec2(ImGui::GetFrameHeight() * 1.4f, 0)) : ImGui::Button(name);
     ImGui::PopID();
-    if (on)
-        ImGui::PopStyleColor(2);
+    ImGui::PopStyleColor((on ? 2 : 0) + (ink ? 1 : 0));
     Tooltip(tip.c_str());
     return clicked;
 }
@@ -263,28 +267,45 @@ void FontText(ImFont *font, const std::string &text, ImVec4 color = ImVec4(1, 1,
         ImGui::PopFont();
 }
 
-fs::path PicturesDir() {
+// The iOS-Emulator folder in one of the user's folders (Pictures, Videos), or `fallback` in the
+// app's data folder when Windows doesn't know it. Created if it's missing.
+fs::path UserFolder(REFKNOWNFOLDERID folder, const char *fallback) {
     PWSTR path = nullptr;
     fs::path dir;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Pictures, 0, nullptr, &path)))
+    if (SUCCEEDED(SHGetKnownFolderPath(folder, 0, nullptr, &path)))
         dir = fs::path(path) / "iOS-Emulator";
     CoTaskMemFree(path);
     if (dir.empty())
-        dir = DataDir() / "screenshots";
+        dir = DataDir() / fallback;
     fs::create_directories(dir);
     return dir;
+}
+
+// A file name for something saved from a device now: "iPod 2024-05-01 14.03.22.png".
+std::wstring StampedName(const Device &device, const char *extension) {
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    char stamp[64];
+    snprintf(stamp, sizeof stamp, " %04d-%02d-%02d %02d.%02d.%02d.%s", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute,
+             t.wSecond, extension);
+    return Widen(device.name + stamp);
 }
 
 // ---- The drum wheel --------------------------------------------------------------------------
 
 // A wheel's motion, kept between frames.
 struct Drum {
+    static constexpr float kBriskPull = 16, kFlingPull = 6;
+
     float position = 0;     // the row at its centre (between two while it turns)
-    float target = 0;       // the row it's easing to
-    float velocity = 0;     // rows per second, while it coasts after a fling
+    float target = 0;       // the row it's turning to
+    float velocity = 0;     // rows per second
+    float pull = kBriskPull;   // how hard the target draws it (1/s)
     bool dragging = false, dragged = false;
     float pressedAt = 0;    // where the mouse went down (y)
     int chosen = -1;        // the row it last reported
+
+    bool Moving() const { return dragging || position != target || velocity != 0; }
 };
 
 struct WheelRow {
@@ -309,8 +330,12 @@ void DrumPicker(const char *id, const std::vector<WheelRow> &rows, int &selected
     const ImVec2 min = ImGui::GetCursorScreenPos(), max(min.x + width, min.y + height);
     const float centerY = (min.y + max.y) / 2;
 
+    const auto turnTo = [&](float row) {
+        drum.target = row;
+        drum.pull = Drum::kBriskPull;
+    };
     if (selected != drum.chosen)   // chosen from outside (a new device): turn to it
-        drum.target = float(selected);
+        turnTo(float(selected));
 
     ImGui::InvisibleButton(id, ImVec2(width, height));
     const bool hovered = ImGui::IsItemHovered();
@@ -321,43 +346,43 @@ void DrumPicker(const char *id, const std::vector<WheelRow> &rows, int &selected
         drum.pressedAt = io.MousePos.y;
     }
     if (drum.dragging && ImGui::IsItemActive()) {
-        // Dragging turns it under the mouse; the speed of the last moments carries on when let go.
+        // Dragging turns it under the mouse; the speed of the last 50 ms carries on when let go.
         const float rows = io.MouseDelta.y / rowHeight;
         drum.position = std::clamp(drum.position - rows, -0.4f, count - 0.6f);
         if (dt > 0)
-            drum.velocity = drum.velocity * 0.6f + (-rows / dt) * 0.4f;
+            drum.velocity += (-rows / dt - drum.velocity) * (1 - std::exp(-dt / 0.05f));
         drum.dragged |= std::abs(io.MousePos.y - drum.pressedAt) > 4;
     }
     if (ImGui::IsItemDeactivated()) {
         drum.dragging = false;
-        if (!drum.dragged) {   // a click: turn to the row under the mouse
+        if (drum.dragged) {   // let go: aim for the row it would coast to
+            drum.pull = std::abs(drum.velocity) > 2 ? Drum::kFlingPull : Drum::kBriskPull;
+            drum.target = std::round(drum.position + drum.velocity / drum.pull);
+        } else {               // a click: turn to the row under the mouse
             const float s = std::clamp((io.MousePos.y - centerY) / radius, -0.99f, 0.99f);
-            drum.target = std::round(drum.position + std::asin(s) * radius / rowHeight);
+            turnTo(std::round(drum.position + std::asin(s) * radius / rowHeight));
             drum.velocity = 0;
         }
     }
-    if (hovered && io.MouseWheel != 0) {
-        drum.target = std::round(drum.target) - io.MouseWheel;
-        drum.velocity = 0;
-    }
+    if (hovered && io.MouseWheel != 0)
+        turnTo(std::round(drum.target) - io.MouseWheel);
     if (hovered && ImGui::IsKeyPressed(ImGuiKey_UpArrow))
-        drum.target = std::round(drum.target) - 1, drum.velocity = 0;
+        turnTo(std::round(drum.target) - 1);
     if (hovered && ImGui::IsKeyPressed(ImGuiKey_DownArrow))
-        drum.target = std::round(drum.target) + 1, drum.velocity = 0;
+        turnTo(std::round(drum.target) + 1);
 
+    // Everything but a drag is one motion: a critically damped spring toward the target, solved
+    // exactly so that it's the same at any frame rate. Its speed never jumps, and a fling, aimed at
+    // where it would coast to, slows down evenly from the moment it's let go until it rests on a row.
     if (!drum.dragging) {
-        if (std::abs(drum.velocity) > 0.8f) {   // coasting after a fling, slowing down
-            drum.position += drum.velocity * dt;
-            drum.velocity *= std::exp(-5.0f * dt);
-            drum.target = std::round(drum.position);
-            if (drum.position < 0 || drum.position > count - 1)
-                drum.velocity = 0;
-        } else {                                 // easing onto the target row
+        drum.target = std::clamp(drum.target, 0.0f, float(count - 1));
+        const float offset = drum.position - drum.target;
+        const float carried = (drum.velocity + drum.pull * offset) * dt, decay = std::exp(-drum.pull * dt);
+        drum.velocity = (drum.velocity - drum.pull * carried) * decay;
+        drum.position = drum.target + (offset + carried) * decay;
+        if (std::abs(drum.position - drum.target) < 0.002f && std::abs(drum.velocity) < 0.02f) {
+            drum.position = drum.target;
             drum.velocity = 0;
-            drum.target = std::clamp(drum.target, 0.0f, float(count - 1));
-            drum.position += (drum.target - drum.position) * std::min(1.0f, dt * 14);
-            if (std::abs(drum.target - drum.position) < 0.001f)
-                drum.position = drum.target;
         }
     }
     selected = std::clamp(int(std::lround(drum.position)), 0, count - 1);
@@ -373,6 +398,10 @@ void DrumPicker(const char *id, const std::vector<WheelRow> &rows, int &selected
     draw->AddLine(ImVec2(bandMin.x, bandMax.y), ImVec2(bandMax.x, bandMax.y), IM_COL32(255, 255, 255, 40));
     draw->PushClipRect(min, max, true);
     const float pad = ImGui::GetFontSize() * 1.1f;
+    // Rows glide between pixels while it turns (snapped, they'd crawl in visible steps as it slows
+    // down), and sit sharply on a pixel at rest.
+    const bool moving = drum.Moving();
+    const auto pixel = [&](float y) { return moving ? y : std::floor(y); };
     for (int i = 0; i < count; i++) {
         const float angle = (i - drum.position) * rowHeight / radius;   // around the cylinder
         if (std::abs(angle) > 1.5f)
@@ -384,9 +413,9 @@ void DrumPicker(const char *id, const std::vector<WheelRow> &rows, int &selected
         const float size = font->FontSize * (0.72f + 0.28f * facing);
         const ImVec2 labelSize = font->CalcTextSizeA(size, FLT_MAX, 0, rows[i].label.c_str());
         const ImU32 ink = center ? IM_COL32(255, 255, 255, alpha) : IM_COL32(170, 174, 182, alpha);
-        draw->AddText(font, size, ImVec2(min.x + pad * 1.6f, std::floor(y - labelSize.y / 2)), ink, rows[i].label.c_str());
+        draw->AddText(font, size, ImVec2(min.x + pad * 1.6f, pixel(y - labelSize.y / 2)), ink, rows[i].label.c_str());
         const ImVec2 detailSize = ImGui::CalcTextSize(rows[i].detail.c_str());
-        draw->AddText(ImVec2(max.x - pad - detailSize.x, std::floor(y - detailSize.y / 2)),
+        draw->AddText(ImVec2(max.x - pad - detailSize.x, pixel(y - detailSize.y / 2)),
                       IM_COL32(140, 144, 152, int(alpha * 0.85f)), rows[i].detail.c_str());
         if (rows[i].tested)
             draw->AddCircleFilled(ImVec2(min.x + pad * 0.8f, y), size * 0.14f,
@@ -425,7 +454,7 @@ public:
             StartDevice(*device);
     }
     bool Finished() const { return finished_; }
-    bool Busy() const { return !sessions_.empty(); }   // something on screen keeps changing
+    bool Busy() const { return !sessions_.empty() || animating_; }   // something on screen keeps changing
     void ShowAddDevice(const std::string &productType = "") {   // the grid, or one device's versions
         page_ = Page::AddDevice;
         if (!productType.empty())
@@ -466,6 +495,7 @@ private:
     void HardwareKeys(Session &session);
     void SendKeys(Session &session);
     void SaveScreenshot(Session &session);
+    void ToggleRecording(Session &session);
     void Rotate(const Device &device);
     Orientation OrientationOf(const Device &device) {
         auto found = orientations_.find(device.id);
@@ -491,6 +521,7 @@ private:
     std::map<std::string, Texture> textures_;
     std::string error_, notice_;
     bool closing_ = false, finished_ = false;
+    bool animating_ = false;                             // this frame shows motion, so the next must follow at once
 
     // Input state for the device on screen.
     bool touching_ = false, twoFingers_ = false;
@@ -579,6 +610,12 @@ void App::UpdateSessions() {
     for (auto it = sessions_.begin(); it != sessions_.end();) {
         Session &session = *it->second;
         session.Update();
+        if (!session.recordingSaved.empty())
+            notice_ = "Saved " + session.recordingSaved;
+        if (!session.recordingError.empty())
+            error_ = session.GetDevice().name + ": the recording failed. " + session.recordingError;
+        session.recordingSaved.clear();
+        session.recordingError.clear();
         if (session.Exited()) {
             if (!session.ExitedCleanly())
                 error_ = session.GetDevice().name + ": " + session.ExitMessage();
@@ -606,6 +643,7 @@ void App::RequestClose() {
 
 void App::Frame() {
     UpdateSessions();
+    animating_ = false;
 
     // Fullscreen shows the device on screen: F11 toggles it, Esc leaves it, and it ends with the device.
     Device *shownDevice = page_ == Page::Device ? Selected() : nullptr;
@@ -722,6 +760,11 @@ void App::DevicePage(Device &device) {
         ImGui::SameLine();
         const bool running = session->state == "running";
         ImGui::TextColored(running ? kGood : kWarn, "%s", session->state.c_str());
+        if (session->recording) {
+            const int seconds = int((NowNs() - session->recordingSince) / 1'000'000'000);
+            ImGui::SameLine();
+            ImGui::TextColored(kBad, "recording %d:%02d", seconds / 60, seconds % 60);
+        }
     }
     ImGui::Separator();
     if (session)
@@ -1256,16 +1299,16 @@ void App::SendKeys(Session &session) {
     }
 }
 
-// The toolbar under the device: Rotate, Pause, Screenshot, Fullscreen | Sound, Internet, Web proxy |
-// Stop, with the box for typing into iOS under it. The hardware buttons are on the device itself.
+// The toolbar under the device: Rotate, Pause, Screenshot, Record, Fullscreen | Sound, Internet, Web
+// proxy | Stop, with the box for typing into iOS under it. The hardware buttons are on the device itself.
 void App::Controls(Session &session) {
     const bool ready = session.state == "running" || session.state == "paused";
     const ImGuiStyle &style = ImGui::GetStyle();
     const float gap = style.ItemSpacing.x * 2;   // between the groups
     const char *mark = "(!)";
-    const char *names[] = {"Rotate", session.paused ? "Resume" : "Pause", "Screenshot", "Fullscreen", "Sound",
+    const char *names[] = {"Rotate", session.paused ? "Resume" : "Pause", "Screenshot", "Record", "Fullscreen", "Sound",
                            "Internet", "Web proxy", "Stop"};
-    float width = gap * 2 + style.ItemSpacing.x * 5;
+    float width = gap * 2 + style.ItemSpacing.x * 6;
     for (const char *name : names)
         width += IconButtonWidth(name);
     if (session.proxyError)
@@ -1287,6 +1330,12 @@ void App::Controls(Session &session) {
     ImGui::SameLine();
     if (IconButton(icon::kCamera, "Screenshot", "Save a screenshot to Pictures\\iOS-Emulator"))
         SaveScreenshot(session);
+    ImGui::SameLine();
+    if (IconButton(icon::kRecord, "Record",
+                   session.recording ? "Stop recording and save the video"
+                                     : "Record the screen and sound to a video in Videos\\iOS-Emulator",
+                   false, session.recording ? &kBad : nullptr))
+        ToggleRecording(session);
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (IconButton(icon::kFullscreen, "Fullscreen", "Only the screen, on the whole monitor (F11). F11 or Esc leaves it."))
@@ -1358,15 +1407,28 @@ void App::Controls(Session &session) {
 void App::SaveScreenshot(Session &session) {
     if (session.FrameWidth() == 0)
         return;
-    SYSTEMTIME t;
-    GetLocalTime(&t);
-    char stamp[64];
-    snprintf(stamp, sizeof stamp, "%04d-%02d-%02d %02d.%02d.%02d", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute,
-             t.wSecond);
-    const fs::path path = PicturesDir() / Widen(session.GetDevice().name + " " + stamp + ".png");
+    const fs::path path = UserFolder(FOLDERID_Pictures, "screenshots") / StampedName(session.GetDevice(), "png");
     try {
         WritePng(path, session.FramePixels().data(), session.FrameWidth(), session.FrameHeight());
         notice_ = "Saved " + PathText(path);
+    } catch (const std::exception &e) {
+        error_ = e.what();
+    }
+}
+
+// Starts or ends the device's recording. The worker does the recording (recorder.h), so it goes on
+// when another device is on screen. The video keeps the orientation the device has now.
+void App::ToggleRecording(Session &session) {
+    if (session.recording) {
+        session.Send({{"cmd", "record"}});
+        return;
+    }
+    const Device &device = session.GetDevice();
+    try {
+        const fs::path path = UserFolder(FOLDERID_Videos, "recordings") / StampedName(device, "mp4");
+        session.Send({{"cmd", "record"},
+                      {"to", PathText(path)},
+                      {"landscape", OrientationOf(device) == Orientation::Landscape}});
     } catch (const std::exception &e) {
         error_ = e.what();
     }
@@ -1662,6 +1724,7 @@ void App::VersionPicker() {
         rows.push_back({"iOS " + f->label, f->build, f->Tested()});
     const float wheelWidth = std::min(ImGui::GetContentRegionAvail().x, ImGui::GetFontSize() * 22);
     DrumPicker("versions", rows, index, drum_, wheelWidth);
+    animating_ = drum_.Moving();
     const Firmware *firmware = versions[index];
     chosenFirmware_ = firmware->id;
     ImGui::Spacing();

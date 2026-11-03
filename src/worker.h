@@ -3,6 +3,7 @@
 // It loads the engine, boots the device and then:
 //   - copies every new screen frame into the shared memory the UI created (common.h, SharedFrame);
 //   - plays the guest's sound;
+//   - records the screen and sound to a video when asked (recorder.h);
 //   - reads commands from stdin and writes events to a pipe, one JSON object per line;
 //   - hosts the USB developer services (services.h) for this device;
 //   - runs the device's web proxy (proxy.h) and installs its certificate in iOS.
@@ -21,6 +22,9 @@
 //                                        "\n" is a line break (Return in a one-line field)
 //   {"cmd":"pause","paused":true}   {"cmd":"mute","muted":true}   {"cmd":"internet","on":true}
 //   {"cmd":"webproxy","on":true}                                      HTTPS through the web proxy's bridge
+//   {"cmd":"record","to":"C:/x.mp4","landscape":false}   starts recording the screen and sound (sideways, for
+//                                                        its whole length, with "landscape"); it needs .mp4
+//   {"cmd":"record"}                                     ends the recording ("stop" and an exit also do)
 //   {"cmd":"stop"}                                                    shuts iOS down cleanly, then exits
 //   Developer requests carry an "id" and get {"event":"reply","id":..,"ok":..,"result"|"error":..} back:
 //     {"cmd":"info"}                                         what lockdown reports about the device
@@ -48,6 +52,7 @@
 //   log     {line}                                        a system log line, while capturing
 //   proxy   {status, error}                               setting up the web proxy (its certificate in iOS)
 //   typing  {message}                                     what couldn't be typed, and why
+//   recording {on, file?, error?}                         a recording started, or ended: saved as file, or failed
 //   exit    {clean, message}                              last line before the worker exits
 #pragma once
 

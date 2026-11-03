@@ -60,6 +60,10 @@ public:
     std::string proxyStatus;          // how setting up the web proxy went (the latest "proxy" event)
     bool proxyError = false;
     std::string typingProblem;        // what couldn't be typed, and why (the latest "typing" event)
+    bool recording = false;           // the screen is being recorded ("record" command)
+    uint64_t recordingSince = 0;      // NowNs() when that started
+    std::string recordingSaved;       // the file the last recording was saved to; the UI clears it once told
+    std::string recordingError;       // ...or why it failed
 
     bool Exited() const { return exited_; }
     bool ExitedCleanly() const { return exitClean_; }
