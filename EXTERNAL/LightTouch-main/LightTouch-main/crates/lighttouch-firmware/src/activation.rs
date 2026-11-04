@@ -284,6 +284,89 @@ pub fn signed(data: &[u8]) -> Result<Vec<u8>> {
     Ok(b)
 }
 
+/// The entitlement that gives a program a sandbox profile of its own, and an equally long name the kernel ignores.
+const SANDBOX_KEY: &[u8] = b"<key>seatbelt-profiles</key>";
+const IGNORED_KEY: &[u8] = b"<key>seatbelt-disabled</key>";
+
+/// The program without its `seatbelt-profiles` entitlement, signed again ad hoc: the key is renamed in place, so nothing
+/// moves, and the signature's entitlements hash follows. `None`: it has no such entitlement.
+pub fn without_sandbox_profile(data: &[u8]) -> Result<Option<Vec<u8>>> {
+    let mut out = data.to_vec();
+    let mut found = false;
+    if data.len() >= 8 && be32(data, 0) == 0xCAFE_BABE {
+        for i in 0..be32(data, 4) as usize {
+            let o = 8 + 20 * i;
+            if o + 20 > data.len() {
+                break;
+            }
+            let (off, size) = (be32(data, o + 8) as usize, be32(data, o + 12) as usize);
+            if be32(data, o) == 12 && off.checked_add(size).is_some_and(|end| end <= data.len()) {
+                found |= rename_sandbox_key(&mut out[off..off + size])?;
+            }
+        }
+    } else {
+        found = rename_sandbox_key(&mut out)?;
+    }
+    if found {
+        signed(&out).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+/// Renames the key in one thin slice and updates its code directories: whether it had the key.
+fn rename_sandbox_key(b: &mut [u8]) -> Result<bool> {
+    const ENTITLEMENTS_SLOT: usize = 5; // both the superblob's index type and the code directory's special slot
+    let invalid = || crate::error::Error::new(crate::error::Code::ActivationFailed, "Unsupported code signature");
+    let (start, size) = code_signature(b).ok_or_else(invalid)?;
+    let end = start.checked_add(size).filter(|&e| e <= b.len() && size >= 12).ok_or_else(invalid)?;
+    if be32(b, start) != 0xFADE_0CC0 {
+        return Err(invalid());
+    }
+    let count = be32(b, start + 8) as usize;
+    if count > (size - 12) / 8 {
+        return Err(invalid());
+    }
+    let (mut entitlements, mut directories) = (None, Vec::new());
+    for i in 0..count {
+        let typ = be32(b, start + 12 + i * 8);
+        let blob = start + be32(b, start + 16 + i * 8) as usize;
+        if blob + 44 > end && (typ == 0 || (0x1000..=0x1005).contains(&typ)) || blob + 8 > end {
+            return Err(invalid());
+        }
+        if typ == ENTITLEMENTS_SLOT as u32 {
+            entitlements = Some(blob);
+        } else if typ == 0 || (0x1000..=0x1005).contains(&typ) {
+            directories.push(blob);
+        }
+    }
+    let Some(blob) = entitlements else { return Ok(false) };
+    let length = be32(b, blob + 4) as usize;
+    if length < 8 || blob + length > end {
+        return Err(invalid());
+    }
+    let Some(at) = b[blob..blob + length].windows(SANDBOX_KEY.len()).position(|w| w == SANDBOX_KEY) else {
+        return Ok(false);
+    };
+    b[blob + at..blob + at + IGNORED_KEY.len()].copy_from_slice(IGNORED_KEY);
+    for directory in directories {
+        let hash_offset = be32(b, directory + 16) as usize;
+        let special = be32(b, directory + 24) as usize;
+        let digest: Vec<u8> = match (b[directory + 37], b[directory + 36]) {
+            (1, 20) => Sha1::digest(&b[blob..blob + length]).to_vec(),
+            (2, 32) => Sha256::digest(&b[blob..blob + length]).to_vec(),
+            _ => return Err(invalid()),
+        };
+        let back = ENTITLEMENTS_SLOT * digest.len();
+        if special < ENTITLEMENTS_SLOT || hash_offset < back || directory + hash_offset > end {
+            return Err(invalid());
+        }
+        let slot = directory + hash_offset - back;
+        b[slot..slot + digest.len()].copy_from_slice(&digest);
+    }
+    Ok(true)
+}
+
 /// LC_CODE_SIGNATURE's (dataoff, datasize) of a thin 32-bit Mach-O in memory.
 fn code_signature(data: &[u8]) -> Option<(usize, usize)> {
     if data.len() < 28 || macho::le32(data, 0) != 0xFEED_FACE {
@@ -433,6 +516,61 @@ mod tests {
         assert_eq!(&out[364..380], &bytes[364..380]); // requirements kept
         bytes[CD + 39] = 0; // invalid page exponent
         assert!(signed(&bytes).is_err());
+    }
+
+    #[test]
+    fn drops_the_sandbox_profile() {
+        // A signature at 256: a code directory at 284 with five special slots, the entitlements blob at 448.
+        const ENT: usize = 448;
+        let mut b = vec![0u8; 512];
+        let put_le = |b: &mut [u8], o: usize, v: u32| b[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        put_le(&mut b, 0, 0xFEED_FACE);
+        put_le(&mut b, 16, 1);
+        put_le(&mut b, 20, 16);
+        put_le(&mut b, 28, 0x1d);
+        put_le(&mut b, 32, 16);
+        put_le(&mut b, 36, 256);
+        put_le(&mut b, 40, 256);
+        put_be32(&mut b, 256, 0xFADE_0CC0);
+        put_be32(&mut b, 260, 256);
+        put_be32(&mut b, 264, 2);
+        put_be32(&mut b, 268, 0);
+        put_be32(&mut b, 272, 28);
+        put_be32(&mut b, 276, 5);
+        put_be32(&mut b, 280, 192);
+        put_be32(&mut b, 284, 0xFADE_0C02);
+        put_be32(&mut b, 288, 164);
+        put_be32(&mut b, 292, 0x20001);
+        put_be32(&mut b, 300, 144); // the page hash, behind the five special ones
+        put_be32(&mut b, 308, 5);
+        put_be32(&mut b, 312, 1);
+        put_be32(&mut b, 316, 256);
+        b[320] = 20;
+        b[321] = 1;
+        b[323] = 12;
+        put_be32(&mut b, ENT, 0xFADE_7171);
+        put_be32(&mut b, ENT + 4, 36);
+        b[ENT + 8..ENT + 36].copy_from_slice(SANDBOX_KEY);
+
+        let out = without_sandbox_profile(&b).unwrap().unwrap();
+        assert_eq!(out.len(), b.len());
+        assert_eq!(&out[ENT + 8..ENT + 36], IGNORED_KEY);
+        assert_eq!(&out[328..348], Sha1::digest(&out[ENT..ENT + 36]).as_slice()); // slot 5
+        assert_eq!(&out[348..428], &[0u8; 80]); // slots 4 to 1 stay
+        assert_eq!(be32(&out, 296), 2); // CS_ADHOC
+
+        let mut fat = vec![0u8; 28];
+        put_be32(&mut fat, 0, 0xCAFE_BABE);
+        put_be32(&mut fat, 4, 1);
+        put_be32(&mut fat, 8, 12);
+        put_be32(&mut fat, 16, 28);
+        put_be32(&mut fat, 20, b.len() as u32);
+        fat.extend_from_slice(&b);
+        assert_eq!(&without_sandbox_profile(&fat).unwrap().unwrap()[28..], out.as_slice());
+
+        assert!(without_sandbox_profile(&out).unwrap().is_none()); // nothing left to drop
+        assert!(without_sandbox_profile(&synthetic_macho()).unwrap().is_none());
+        assert!(without_sandbox_profile(&[0u8; 64]).is_err());
     }
 
     #[test]

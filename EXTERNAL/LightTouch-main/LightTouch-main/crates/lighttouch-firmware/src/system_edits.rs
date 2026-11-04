@@ -6,8 +6,9 @@
 //!               CA_ENABLE_OGL=0) + stdio on /dev/console; [appsync] libappsync.dylib injected into installd;
 //!               [ca_ogl] the GL front end as OpenGLES.framework/OpenGLES (+ dyld's override switch: OpenGLES is
 //!               cached); [web_proxy] the PAC; the guest helpers; storage_mounter loads it_msmquiet; BTServer
-//!               Disabled (unless the machine answers its HCI); lockdownd activated; the guest-package loader and
-//!               seed package from armv7.itpack, whose jobs it_boot loads.
+//!               Disabled (unless the machine answers its HCI, and then on jailbroken iOS 4 BlueTool loses its sandbox
+//!               profile); lockdownd activated; the guest-package loader and seed package from armv7.itpack, whose
+//!               jobs it_boot loads.
 //!   data.img    fresh journaled HFSX "Data" (sparse) seeded with the system volume's /private/var skeleton
 //!               (+ [web_proxy] the en0 AirPort service with the PAC), owners from the source catalog, else root /
 //!               mobile by rule.
@@ -173,6 +174,7 @@ pub const NOTICE_JOBS: [(&str, &str); 3] = [
     ("System/Library/LaunchDaemons/com.apple.device-o-matic.plist", "com.apple.device-o-matic"),
 ];
 pub const BT_JOB: &str = "System/Library/LaunchDaemons/com.apple.BTServer.plist";
+pub const BLUETOOL: &str = "usr/sbin/BlueTool";
 /// Jobs launchd starts at boot for services an emulated device has no use for, each Disabled where present: Apple's
 /// servers for them are gone or refuse these releases, or the hardware is absent (together ~12% of n81ap 6.1.6's
 /// first-start guest CPU). Not usbptpd: without it usbmux never enumerates. Not backupd: MobileBackup raises without it.
@@ -460,6 +462,8 @@ pub fn build_k48(
     }
     if !o.bluetooth {
         disable(&mut ed, BT_JOB)?;
+    } else if o.jailbreak && product_major == 4 {
+        unsandbox_bluetool(&mut ed, log)?;
     }
     if o.quiet_services {
         let quieted: Vec<String> = DEAD_SERVICE_JOBS.iter().map(|n| job(&format!("{n}.plist"))).filter(|j| ed.exists(j)).collect();
@@ -693,6 +697,26 @@ pub fn edit_springboard_job(ed: &mut Editor, edit: impl FnOnce(&mut Dictionary) 
         }
         edit(d)
     })
+}
+
+/// BTServer starts BlueTool, whose entitlement asks for a sandbox profile of its own. A jailbroken iOS 4 kernel refuses
+/// that switch and kills BTServer ("already in a sandbox, unable to switch to:"; stock 4.2.1 and jailbroken 6.1.6 don't),
+/// launchd restarts it for good, and SpringBoard, waiting on it in BluetoothManager, draws nothing for one second in two.
+/// Without the entitlement BlueTool simply stays in BTServer's sandbox. A BlueTool this can't edit is only logged: it
+/// costs that stutter, not the device.
+fn unsandbox_bluetool(ed: &mut Editor, log: &dyn Fn(&str)) -> Result<()> {
+    if !ed.exists(BLUETOOL) {
+        return Ok(());
+    }
+    match activation::without_sandbox_profile(&ed.read(BLUETOOL)?) {
+        Ok(Some(tool)) => {
+            ed.write(BLUETOOL, tool, None)?;
+            log("BlueTool: runs in BTServer's sandbox");
+        }
+        Ok(None) => log("BlueTool: has no sandbox profile of its own"),
+        Err(e) => log(&format!("BlueTool: left stock: {}", e.message)),
+    }
+    Ok(())
 }
 
 fn disable(ed: &mut Editor, job: &str) -> Result<()> {
