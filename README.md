@@ -28,6 +28,7 @@ It is heavily WIP and still has bugs.
    | --- | --- |
    | Click, drag | Tap, swipe |
    | Alt + drag | Pinch or rotate with two fingers |
+   | Shift + drag | Swipe with four fingers in a row (iPad multitasking gestures, on iOS versions that have them) |
    | H / P | Home / Sleep-Wake (held while the key is) |
    | + / - | Volume |
    | R, or the Rotate button | Portrait or landscape: the device turns, and apps that support landscape turn with it |

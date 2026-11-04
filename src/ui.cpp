@@ -474,12 +474,14 @@ void DrumPicker(const char *id, const std::vector<WheelRow> &rows, int &selected
 // ---- The app ---------------------------------------------------------------------------------
 
 // A finger on the screen, as shown. Each has a fixed id, because the engine follows fingers by id:
-// the mouse, its Alt mirror, then every finger of every control.
+// the mouse, its Alt mirror, the rest of its Shift row, then every finger of every control.
 struct Finger {
     int id;
     ImVec2 at;
 };
-constexpr int kMouseFinger = 1, kAltFinger = 2, kFirstKeyFinger = 3;
+constexpr int kSwipeRow = 4;         // fingers in a Shift + drag: the mouse's and three more
+constexpr float kSwipeGap = 0.08f;   // between them, as a share of the screen's width
+constexpr int kMouseFinger = 1, kAltFinger = 2, kSwipeFinger = 3, kFirstKeyFinger = kSwipeFinger + kSwipeRow - 1;
 int KeyFinger(int control, int finger) { return kFirstKeyFinger + control * kMaxFingers + finger; }
 
 class App {
@@ -585,7 +587,7 @@ private:
     bool animating_ = false;                             // this frame shows motion, so the next must follow at once
 
     // Input state for the device on screen.
-    bool touching_ = false, twoFingers_ = false;
+    bool touching_ = false, twoFingers_ = false, swipeRow_ = false;
     std::map<int, ImVec2> fingers_;                      // what iOS has down: finger id -> panel position
     std::vector<int> heldControls_;                      // the controls whose keys are held, oldest press first
     std::set<int> heldButtons_;                          // held from the keyboard
@@ -1182,9 +1184,11 @@ void DrawControl(ImDrawList *draw, const Control &control, const std::vector<ImV
 }
 
 // Everything that touches the screen, gathered into one list each frame. The mouse is a finger:
-// press, drag and release on the screen. Hold Alt while dragging for a second, mirrored finger
-// (pinch and rotate), on boards with multi-touch. In Controls mode, the keys bound to controls are
-// fingers too. The editor's circles come first, which gives them the mouse before the screen.
+// press, drag and release on the screen. On boards with multi-touch, a key held as the drag starts
+// sets its gesture until it ends: Alt adds a second, mirrored finger (pinch and rotate), and Shift
+// turns the mouse into a row of fingers that move with it (multi-finger swipes). Alt wins if both
+// are held. In Controls mode, the keys bound to controls are fingers too. The editor's circles come
+// first, which gives them the mouse before the screen.
 void App::ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, Orientation orientation, bool turned) {
     const Device &device = session.GetDevice();
     Layout &layout = keymaps_[device.id].For(orientation);
@@ -1207,24 +1211,34 @@ void App::ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, Orientation 
         session.Send({{"cmd", "button"}, {"button", QEMU_IOS_BUTTON_HOME}, {"down", false}});
     } else if (ImGui::IsItemActivated() && !session.paused) {
         touching_ = true;
-        twoFingers_ = ImGui::GetIO().KeyAlt && (session.capabilities & QEMU_IOS_CAP_MULTITOUCH);
+        const bool multiTouch = session.capabilities & QEMU_IOS_CAP_MULTITOUCH;
+        twoFingers_ = ImGui::GetIO().KeyAlt && multiTouch;
+        swipeRow_ = ImGui::GetIO().KeyShift && multiTouch && !twoFingers_;
     }
     if (!ImGui::IsItemActive() || session.paused)
         touching_ = false;
 
     std::vector<Finger> fingers;
-    if (touching_) {
+    auto awayFromCursor = [&](int id, ImVec2 at) {   // a finger the cursor doesn't show, so it gets a circle
+        fingers.push_back({id, at});
+        ImGui::GetWindowDrawList()->AddCircle(ImVec2(origin.x + at.x * size.x, origin.y + at.y * size.y), 10,
+                                              IM_COL32(255, 255, 255, 160), 0, 2);
+    };
+    if (touching_ && swipeRow_) {
+        // The whole row shifts in from the edges, so it keeps its spacing. It's centred on the cursor,
+        // which leaves every finger, the mouse's too, beside it.
+        const float half = (kSwipeRow - 1) * kSwipeGap / 2;
+        const float left = std::clamp(x, half, 1 - half) - half;
+        awayFromCursor(kMouseFinger, ImVec2(left, y));
+        for (int i = 1; i < kSwipeRow; i++)
+            awayFromCursor(kSwipeFinger + i - 1, ImVec2(left + i * kSwipeGap, y));
+    } else if (touching_) {
         fingers.push_back({kMouseFinger, ImVec2(x, y)});
         if (twoFingers_)
-            fingers.push_back({kAltFinger, ImVec2(1 - x, 1 - y)});
+            awayFromCursor(kAltFinger, ImVec2(1 - x, 1 - y));
     }
     KeyFingers(session, layout, fingers);
     SendFingers(session, fingers, orientation, turned);
-
-    if (twoFingers_ && touching_) {   // show where the second finger is
-        ImGui::GetWindowDrawList()->AddCircle(ImVec2(origin.x + (1 - x) * size.x, origin.y + (1 - y) * size.y), 10,
-                                              IM_COL32(255, 255, 255, 160), 0, 2);
-    }
 }
 
 // Adds the fingers of the keys held down to `fingers`, oldest press first. A key counts from the
@@ -1924,7 +1938,7 @@ void App::SettingsPage() {
 
     ImGui::Spacing();
     DimText("CONTROLS");
-    ImGui::BulletText("Click and drag on the screen to touch. Hold Alt while dragging to pinch or rotate.");
+    ImGui::BulletText("Click and drag on the screen to touch. Hold Alt while dragging to pinch or rotate, or Shift to swipe with four fingers.");
     ImGui::BulletText("The device's buttons work: click Home, Sleep/Wake or the volume keys (hold them as on the real one).");
     if (settings_.ShortcutsTakeCtrl()) {
         ImGui::BulletText(settings_.keyboard == KeyboardMode::Typing
