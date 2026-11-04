@@ -462,7 +462,7 @@ pub fn build_k48(
     }
     if !o.bluetooth {
         disable(&mut ed, BT_JOB)?;
-    } else if o.jailbreak && product_major == 4 {
+    } else if o.jailbreak && (4..=5).contains(&product_major) {
         unsandbox_bluetool(&mut ed, log)?;
     }
     if o.quiet_services {
@@ -699,7 +699,7 @@ pub fn edit_springboard_job(ed: &mut Editor, edit: impl FnOnce(&mut Dictionary) 
     })
 }
 
-/// BTServer starts BlueTool, whose entitlement asks for a sandbox profile of its own. A jailbroken iOS 4 kernel refuses
+/// BTServer starts BlueTool, whose entitlement asks for a sandbox profile of its own. A jailbroken iOS 4 or 5 kernel refuses
 /// that switch and kills BTServer ("already in a sandbox, unable to switch to:"; stock 4.2.1 and jailbroken 6.1.6 don't),
 /// launchd restarts it for good, and SpringBoard, waiting on it in BluetoothManager, draws nothing for one second in two.
 /// Without the entitlement BlueTool simply stays in BTServer's sandbox. A BlueTool this can't edit is only logged: it
