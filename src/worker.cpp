@@ -114,6 +114,47 @@ std::string InputError(int status, const std::string &body) {
     }
 }
 
+// ---- Packages --------------------------------------------------------------------------------
+
+// The guest script that installs <job>.deb, saved as <job>.sh and run as a launchd job called <job>.
+// It logs to <job>.log and writes dpkg's status to <job>.status when it's done. A package whose
+// dependencies are missing stays half-installed, so that's undone. A new app needs uicache (as
+// mobile, whose caches SpringBoard reads), a new tweak a new SpringBoard. launchd would run the
+// script again and again, so it removes its own job last.
+constexpr char kInstallDeb[] = R"(f=${0%.sh}
+exec </dev/null >$f.log 2>&1
+package=$(dpkg-deb -f $f.deb Package 2>/dev/null)
+contents=$(dpkg-deb -c $f.deb 2>/dev/null)
+dpkg -i $f.deb
+status=$?
+rm -f $f.deb
+if [ $status != 0 ]; then
+    (dpkg -s "$package" | grep -q 'ok installed' || dpkg --remove "$package") >/dev/null 2>&1
+else
+    case "$contents" in *' ./Applications/'*) su -c uicache mobile ;; esac
+    case "$contents" in *' ./Library/MobileSubstrate/DynamicLibraries/'*) launchctl stop com.apple.SpringBoard ;; esac
+fi
+echo $status > $f.status
+launchctl remove ${f##*/}
+)";
+
+// What a failed dpkg log means. dpkg says " foo depends on bar (>= 2.0); however:" for each missing
+// dependency; anything else is shown as it is, without the summary dpkg ends with.
+std::string PackageError(const std::string &log) {
+    std::string missing, line;
+    for (std::istringstream lines(log); std::getline(lines, line);) {
+        const size_t start = line.find(" depends on ");
+        if (start != std::string::npos)
+            missing += (missing.empty() ? "" : ", ") + line.substr(start + 12, line.find(';') - start - 12);
+    }
+    if (!missing.empty())
+        return "It needs " + missing + ". Install that first.";
+    std::string text = log.substr(0, log.find("Errors were encountered"));
+    while (!text.empty() && text.back() == '\n')
+        text.pop_back();
+    return text;
+}
+
 // ---- The worker ------------------------------------------------------------------------------
 
 class Worker {
@@ -159,6 +200,8 @@ private:
     void StartRecording(const fs::path &file, bool landscape);
     void StopRecording();
     Json SaveSnapshot(const std::string &name);
+    void InstallPackage(const fs::path &deb, const std::function<void(const std::string &)> &progress);
+    AgentReply Shell(const std::string &script);
     AgentReply Agent(const std::string &op, const std::string &argument, const std::string &body,
                      std::chrono::milliseconds timeout = 30s);
 
@@ -640,10 +683,14 @@ void Worker::HandleDeveloperCommand(const Json &command) {
                 services_.RenamePath(path, command.at("to").get<std::string>());
             } else if (cmd == "apps.list") {
                 result = services_.ListApps();
-            } else if (cmd == "apps.install") {
-                services_.InstallApp(fs::path(Widen(command.at("ipa").get<std::string>())), [&](const std::string &text) {
+            } else if (cmd == "apps.install" || cmd == "packages.install") {
+                auto progress = [&](const std::string &text) {
                     Send({{"event", "progress"}, {"id", command["id"]}, {"text", text}});
-                });
+                };
+                if (cmd == "apps.install")
+                    services_.InstallApp(fs::path(Widen(command.at("ipa").get<std::string>())), progress);
+                else
+                    InstallPackage(fs::path(Widen(command.at("deb").get<std::string>())), progress);
             } else if (cmd == "apps.launch") {
                 AgentReply reply = Agent("launch", command.at("bundle").get<std::string>(), "");
                 if (reply.status != 0)
@@ -803,6 +850,43 @@ void Worker::TrustWebProxy() {
               {"status", trusted ? "Ready: iOS trusts the web proxy" : "iOS didn't accept the web proxy's certificate"},
               {"error", !trusted}});
     });
+}
+
+// Installs a .deb with the jailbreak's dpkg. The guest agent ends a program after a minute or less,
+// along with anything it left in the background, which would break dpkg's database in the middle
+// of a big package. So launchd runs the install (kInstallDeb), and this asks every 2 seconds
+// whether it has finished.
+void Worker::InstallPackage(const fs::path &deb, const std::function<void(const std::string &)> &progress) {
+    if (!device_.Jailbroken())
+        throw std::runtime_error("Only a jailbroken device can install .deb packages.");
+    const std::string name = "ios-emulator-" + RandomHex(8), job = "/private/var/tmp/" + name;
+    services_.UploadFile(deb, job + ".deb", [&](uint64_t sent, uint64_t total) {
+        progress("Copying to the device: " + FormatBytes(sent) + " of " + FormatBytes(total));
+    });
+    progress("Installing the package");
+    if (Agent("put", job + ".sh 755", kInstallDeb).status != 0 ||
+        Shell("launchctl submit -l " + name + " -- /bin/sh " + job + ".sh").status != 0)
+        throw std::runtime_error("The guest tools aren't answering");
+
+    const auto deadline = std::chrono::steady_clock::now() + 10min;
+    for (;;) {
+        std::this_thread::sleep_for(2s);
+        // The first line is dpkg's status, the rest its log.
+        AgentReply reply = Shell("[ -e " + job + ".status ] && cat " + job + ".status " + job + ".log && rm -f " + job + ".*");
+        if (reply.status == 0) {
+            if (std::atoi(reply.body.c_str()) == 0)
+                return;
+            throw std::runtime_error(PackageError(reply.body.substr(reply.body.find('\n') + 1)));
+        }
+        if (done_ || std::chrono::steady_clock::now() > deadline)
+            throw std::runtime_error("It didn't finish within 10 minutes");
+    }
+}
+
+// Runs a shell script in the guest as root and returns its output.
+Worker::AgentReply Worker::Shell(const std::string &script) {
+    using namespace std::string_literals;
+    return Agent("spawn", "", "/bin/sh\0-c\0"s + script + '\0');
 }
 
 Worker::AgentReply Worker::Agent(const std::string &op, const std::string &argument, const std::string &body,

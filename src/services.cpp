@@ -299,9 +299,10 @@ void Services::Upload(afc_client_t afc, const fs::path &from, const std::string 
     CheckAfc(error, "Can't write " + path);
 }
 
-void Services::UploadFile(const fs::path &from, const std::string &path) {
+void Services::UploadFile(const fs::path &from, const std::string &path,
+                          const std::function<void(uint64_t, uint64_t)> &progress) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    Upload(Afc(), from, path, nullptr);
+    Upload(Afc(), from, path, progress);
 }
 
 void Services::DeleteTree(afc_client_t afc, const std::string &path) {

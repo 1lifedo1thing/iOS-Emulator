@@ -33,7 +33,8 @@ public:
     bool RootAccess();                                     // AFC2 is available (jailbroken device)
     Json ListFiles(const std::string &path);               // [{name, type: file|folder|link, size, modified, target}]
     void DownloadFile(const std::string &path, const fs::path &to);
-    void UploadFile(const fs::path &from, const std::string &path);
+    void UploadFile(const fs::path &from, const std::string &path,
+                    const std::function<void(uint64_t sent, uint64_t total)> &progress = nullptr);
     void DeletePath(const std::string &path);              // folders with everything inside
     void MakeFolder(const std::string &path);
     void RenamePath(const std::string &from, const std::string &to);

@@ -496,6 +496,7 @@ public:
 
     void Frame();
     void RequestClose();
+    void DropFiles(const std::vector<fs::path> &files);
     void StartSelected() {
         if (Device *device = Selected())
             StartDevice(*device);
@@ -569,6 +570,7 @@ private:
     void DevRequest(Session &session, Json command, std::function<void(const Json &)> onSuccess);
     void DevListFiles(const std::string &id, const std::string &path);
     void DevListApps(const std::string &id);
+    void InstallDropped(Session &session, const fs::path &file, bool package);
     void ClosingOverlay();
     void ForceOffOverlay();
 
@@ -639,6 +641,7 @@ private:
             return true;
         }
         std::string installStatus;
+        int drops = 0;                   // files dropped on the window, still installing
         std::string terminal, command;
         bool scrollTerminal = false;
         bool syslogOn = false;
@@ -692,6 +695,8 @@ void App::UpdateSessions() {
             error_ = session.GetDevice().name + ": the recording failed. " + session.recordingError;
         session.recordingSaved.clear();
         session.recordingError.clear();
+        if (devPanels_[it->first].drops > 0 && !session.progress.empty())
+            notice_ = session.GetDevice().name + ": " + session.progress;
         if (session.Exited()) {
             if (!session.ExitedCleanly())
                 error_ = session.GetDevice().name + ": " + session.ExitMessage();
@@ -2313,6 +2318,47 @@ void App::DevListApps(const std::string &id) {
         });
 }
 
+// Installs files dropped on the window on the selected device: .ipa apps on any device, .deb
+// packages on a jailbroken one (the worker refuses them otherwise). The worker does them in order.
+void App::DropFiles(const std::vector<fs::path> &files) {
+    for (const fs::path &file : files) {
+        std::string extension = PathText(file.extension());
+        std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return char(tolower(c)); });
+        const Device *device = Selected();
+        Session *session = device ? SessionFor(*device) : nullptr;
+        if (extension != ".ipa" && extension != ".deb") {
+            error_ = "Only .ipa and .deb files can be installed: " + PathText(file.filename());
+        } else if (!device) {
+            error_ = "Add a device first, then drop the file again.";
+        } else if (!session || session->Stopping()) {
+            error_ = "Start " + device->name + " first, then drop the file again.";
+        } else {
+            InstallDropped(*session, file, extension == ".deb");
+        }
+    }
+}
+
+// Shows how an install goes above the page, since the developer tools may be hidden.
+void App::InstallDropped(Session &session, const fs::path &file, bool package) {
+    const std::string id = session.GetDevice().id, device = session.GetDevice().name, name = PathText(file.filename());
+    error_.clear();
+    notice_ = device + ": installing " + name;
+    session.progress.clear();
+    devPanels_[id].drops++;
+    session.Request({{"cmd", package ? "packages.install" : "apps.install"}, {package ? "deb" : "ipa", PathText(file)}},
+                    [this, id, device, name](const Json &reply) {
+                        DevPanel &panel = devPanels_[id];
+                        panel.drops--;
+                        panel.appsLoaded = false;   // the Apps tab reloads when it's next shown
+                        if (reply.value("ok", false)) {
+                            notice_ = name + " is installed on " + device + ".";
+                        } else {
+                            notice_.clear();
+                            error_ = "Couldn't install " + name + " on " + device + ": " + reply.value("error", "it failed.");
+                        }
+                    });
+}
+
 void App::DeveloperPanel(Device &device, Session &session) {
     DevPanel &panel = devPanels_[device.id];
     const bool ready = session.state == "running" || session.state == "paused";
@@ -2503,7 +2549,8 @@ void App::DeveloperPanel(Device &device, Session &session) {
                 });
             }
         }
-        Tooltip("Unsigned apps work too: AppSync is part of every prepared device.");
+        Tooltip("Unsigned apps work too: AppSync is part of every prepared device.\n"
+                "You can also drop an .ipa, or a .deb on a jailbroken device, on the window.");
         if (!session.progress.empty() && panel.busy > 0)
             panel.installStatus = session.progress;
         if (!panel.installStatus.empty())
@@ -2658,11 +2705,25 @@ void App::ForceOffOverlay() {
 // device (IOS_EMULATOR_UI_FULLSCREEN=1 also shows it fullscreen, IOS_EMULATOR_UI_LANDSCAPE=1 turns
 // it, IOS_EMULATOR_UI_DEVTOOLS=1 shows the developer tools without saving that), IOS_EMULATOR_UI_PAGE=add
 // opens the Add Device page (IOS_EMULATOR_UI_PRODUCT=<product type>, e.g. iPhone3,1, goes straight to
-// that device's versions), and IOS_EMULATOR_UI_SHOT=<file.png> saves the window after
-// IOS_EMULATOR_UI_SHOT_AFTER seconds (default 5) and closes the app.
+// that device's versions), IOS_EMULATOR_UI_DROP=<file> drops that file on the window after
+// IOS_EMULATOR_UI_DROP_AFTER seconds (default 1), and IOS_EMULATOR_UI_SHOT=<file.png> saves the
+// window after IOS_EMULATOR_UI_SHOT_AFTER seconds (default 5) and closes the app.
 std::string EnvText(const char *name) {
     const char *value = getenv(name);
     return value ? value : "";
+}
+
+// Posts what Windows sends the window when a file is dropped on it (for IOS_EMULATOR_UI_DROP).
+void PostDrop(HWND hwnd, const std::string &file) {
+    const std::wstring path = Widen(file);
+    // A DROPFILES header, then the paths, the last one followed by an extra NUL.
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, sizeof(DROPFILES) + (path.size() + 2) * sizeof(wchar_t));
+    auto *drop = static_cast<DROPFILES *>(GlobalLock(memory));
+    drop->pFiles = sizeof(DROPFILES);
+    drop->fWide = TRUE;
+    memcpy(drop + 1, path.c_str(), path.size() * sizeof(wchar_t));
+    GlobalUnlock(memory);
+    PostMessageW(hwnd, WM_DROPFILES, reinterpret_cast<WPARAM>(memory), 0);
 }
 
 void SaveWindowPicture(const fs::path &path, int width, int height) {
@@ -2694,6 +2755,19 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         if ((wParam & 0xfff0) == SC_KEYMENU)   // Alt is for two-finger touches, not the window menu
             return 0;
         break;
+    case WM_DROPFILES: {
+        HDROP drop = reinterpret_cast<HDROP>(wParam);
+        std::vector<fs::path> files(DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0));
+        for (UINT i = 0; i < files.size(); i++) {
+            std::wstring path(DragQueryFileW(drop, i, nullptr, 0), L'\0');
+            DragQueryFileW(drop, i, path.data(), UINT(path.size() + 1));
+            files[i] = path;
+        }
+        DragFinish(drop);
+        if (g_app)
+            g_app->DropFiles(files);
+        return 0;
+    }
     case WM_CLOSE:
         if (g_app)
             g_app->RequestClose();
@@ -2769,6 +2843,7 @@ int RunUi() {
     HWND hwnd = CreateWindowW(windowClass.lpszClassName, L"iOS Emulator", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
                               CW_USEDEFAULT, int(1280 * scale), int(860 * scale), nullptr, nullptr,
                               windowClass.hInstance, nullptr);
+    DragAcceptFiles(hwnd, TRUE);   // .ipa and .deb files dropped on the window install (App::DropFiles)
 
     // A plain OpenGL context for the window (Dear ImGui's OpenGL 3 backend draws with it).
     HDC dc = GetDC(hwnd);
@@ -2815,6 +2890,8 @@ int RunUi() {
         g_app = &app;
         const std::string shot = EnvText("IOS_EMULATOR_UI_SHOT");
         const double shotAfter = EnvText("IOS_EMULATOR_UI_SHOT_AFTER").empty() ? 5.0 : atof(EnvText("IOS_EMULATOR_UI_SHOT_AFTER").c_str());
+        std::string drop = EnvText("IOS_EMULATOR_UI_DROP");
+        const double dropAfter = EnvText("IOS_EMULATOR_UI_DROP_AFTER").empty() ? 1.0 : atof(EnvText("IOS_EMULATOR_UI_DROP_AFTER").c_str());
         const uint64_t started = NowNs();
         if (EnvText("IOS_EMULATOR_UI_START") == "1")
             app.StartSelected();
@@ -2839,6 +2916,10 @@ int RunUi() {
                 DispatchMessageW(&message);
                 if (message.message == WM_QUIT)
                     app.RequestClose();
+            }
+            if (!drop.empty() && (NowNs() - started) / 1e9 > dropAfter) {
+                PostDrop(hwnd, drop);
+                drop.clear();
             }
             if (IsIconic(hwnd) && !app.Busy()) {
                 Sleep(50);

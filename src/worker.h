@@ -37,6 +37,8 @@
 //     {"cmd":"files.download","path":..,"to":"C:/x"}   {"cmd":"files.upload","from":"C:/x","path":..}
 //     {"cmd":"files.delete","path":..}   {"cmd":"files.mkdir","path":..}   {"cmd":"files.rename","path":..,"to":..}
 //     {"cmd":"apps.list"}   {"cmd":"apps.install","ipa":"C:/app.ipa"}   {"cmd":"apps.launch","bundle":..}
+//     {"cmd":"packages.install","deb":"C:/tweak.deb"}        jailbroken devices: dpkg -i, undone if dependencies
+//                                                            are missing, then uicache and a respring if needed
 //     {"cmd":"shell","command":"ls /","sh":true}             runs as root; result {status, output}
 //     {"cmd":"ui.dump"}                                      the front app's views, one per line, with their
 //                                                            text (it_typein); result {views}
@@ -53,7 +55,7 @@
 //   board   {machine, width, height, capabilities, maxContacts}   once, before booting
 //   status  {state: starting|running|paused|stopping, sleeping, agent}   when it changes
 //   reply   {id, ok, error?, result?}                     the answer to a developer request
-//   progress {id, text}                                   how a long request (an app install) is going
+//   progress {id, text}                                   how a long request (an install) is going
 //   log     {line}                                        a system log line, while capturing
 //   proxy   {status, error}                               setting up the web proxy (its certificate in iOS)
 //   typing  {message}                                     what couldn't be typed, and why
