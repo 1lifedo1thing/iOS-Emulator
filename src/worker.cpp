@@ -1,6 +1,7 @@
 #include "worker.h"
 
 #include "engine.h"
+#include "ipa.h"
 #include "library.h"
 #include "proxy.h"
 #include "recorder.h"
@@ -687,10 +688,16 @@ void Worker::HandleDeveloperCommand(const Json &command) {
                 auto progress = [&](const std::string &text) {
                     Send({{"event", "progress"}, {"id", command["id"]}, {"text", text}});
                 };
-                if (cmd == "apps.install")
-                    services_.InstallApp(fs::path(Widen(command.at("ipa").get<std::string>())), progress);
-                else
+                if (cmd == "apps.install") {
+                    const fs::path ipa(Widen(command.at("ipa").get<std::string>()));
+                    const IpaInfo app = ReadIpa(ipa);
+                    if (IosOlderThan(device_.Version(), app.minimumOS))   // installd would say so minutes from now
+                        throw std::runtime_error("This app needs iOS " + app.minimumOS + " or later, and this device runs iOS " +
+                                                 device_.Version() + ".");
+                    services_.InstallApp(ipa, app.unpackedBytes, progress);
+                } else {
                     InstallPackage(fs::path(Widen(command.at("deb").get<std::string>())), progress);
+                }
             } else if (cmd == "apps.launch") {
                 AgentReply reply = Agent("launch", command.at("bundle").get<std::string>(), "");
                 if (reply.status != 0)

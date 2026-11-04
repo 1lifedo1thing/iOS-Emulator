@@ -11,7 +11,8 @@
 //                                          boots a device without a window (for testing and scripts);
 //                                          --no-web-proxy lets iOS connect to websites itself (proxy.h);
 //                                          --tap/--swipe touch the screen (coordinates 0..1) t seconds after start;
-//                                          --request sends a developer command (worker.h) and prints the reply;
+//                                          --request sends a developer command (worker.h) and prints the reply,
+//                                          and the progress of a long one with the seconds since the start;
 //                                          --send sends any other command (e.g. {"cmd":"type","text":"hi"});
 //                                          --shot saves the screen t seconds after start;
 //                                          --save-snapshot saves the machine t seconds after start;
@@ -78,7 +79,7 @@ static int RunCommand(const std::vector<std::string> &args) {
         double at;
         std::string file;
     };
-    std::string name, screenshot, typingProblem, snapshot;
+    std::string name, screenshot, typingProblem, snapshot, progress;
     std::vector<Gesture> gestures;
     std::vector<Command> commands;
     std::vector<Shot> shots;
@@ -182,6 +183,10 @@ static int RunCommand(const std::vector<std::string> &args) {
         if (session.typingProblem != typingProblem) {
             typingProblem = session.typingProblem;
             Print("Typing: " + typingProblem);
+        }
+        if (session.progress != progress) {   // how a long request (an install) is going, with the time
+            progress = session.progress;
+            Print(std::to_string(int(elapsed)) + " s: " + progress);
         }
         if (session.state != lastState) {
             lastState = session.state;

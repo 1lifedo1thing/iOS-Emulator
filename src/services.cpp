@@ -388,7 +388,16 @@ Json Services::ListApps() {
     return list;
 }
 
-void Services::InstallApp(const fs::path &ipa, const std::function<void(const std::string &)> &progress) {
+// The free space on the volume an AFC client sees; 0 if iOS doesn't say.
+static uint64_t FreeBytes(afc_client_t afc) {
+    char *value = nullptr;
+    if (afc_get_device_info_key(afc, "FSFreeBytes", &value) != AFC_E_SUCCESS)
+        return 0;
+    return strtoull(TakeString(value).c_str(), nullptr, 10);
+}
+
+void Services::InstallApp(const fs::path &ipa, uint64_t unpackedBytes,
+                          const std::function<void(const std::string &)> &progress) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     // 1. Upload it to the Media folder's PublicStaging, where installd picks packages up.
     Lockdown lockdown(Device());
@@ -439,6 +448,8 @@ void Services::InstallApp(const fs::path &ipa, const std::function<void(const st
         }
         o->changed.notify_one();
     };
+    const uint64_t freeAtStart = FreeBytes(media);
+    uint64_t unpacked = 0;
     InstallProxy proxy(Device());
     if (instproxy_install(proxy.client, staged.c_str(), nullptr, callback, &outcome) != INSTPROXY_E_SUCCESS) {
         afc_remove_path(media, staged.c_str());
@@ -454,7 +465,17 @@ void Services::InstallApp(const fs::path &ipa, const std::function<void(const st
                 break;
             }
             outcome.changed.wait_for(lock, std::chrono::seconds(1));
-            progress("Installing: " + outcome.status + " (" + std::to_string(outcome.percent) + "%)");
+            if (outcome.status == "ExtractingPackage" && unpackedBytes && freeAtStart) {
+                // installd stays silent while it unpacks, the longest step, but the free space falls.
+                lock.unlock();   // the status callback mustn't wait for iOS's answer
+                const uint64_t freeNow = FreeBytes(media);
+                if (freeNow)
+                    unpacked = std::min(unpackedBytes, freeAtStart - std::min(freeAtStart, freeNow));
+                progress("Unpacking: " + FormatBytes(unpacked) + " of " + FormatBytes(unpackedBytes));
+                lock.lock();
+            } else {
+                progress("Installing: " + outcome.status + " (" + std::to_string(outcome.percent) + "%)");
+            }
         }
     }
     afc_remove_path(media, staged.c_str());

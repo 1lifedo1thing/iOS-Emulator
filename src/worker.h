@@ -36,7 +36,8 @@
 //     {"cmd":"files.list","path":"/"}                        [{name, type, size, modified, target}]
 //     {"cmd":"files.download","path":..,"to":"C:/x"}   {"cmd":"files.upload","from":"C:/x","path":..}
 //     {"cmd":"files.delete","path":..}   {"cmd":"files.mkdir","path":..}   {"cmd":"files.rename","path":..,"to":..}
-//     {"cmd":"apps.list"}   {"cmd":"apps.install","ipa":"C:/app.ipa"}   {"cmd":"apps.launch","bundle":..}
+//     {"cmd":"apps.list"}   {"cmd":"apps.launch","bundle":..}
+//     {"cmd":"apps.install","ipa":"C:/app.ipa"}              refused at once if it needs a newer iOS (ipa.h)
 //     {"cmd":"packages.install","deb":"C:/tweak.deb"}        jailbroken devices: dpkg -i, undone if dependencies
 //                                                            are missing, then uicache and a respring if needed
 //     {"cmd":"shell","command":"ls /","sh":true}             runs as root; result {status, output}

@@ -39,7 +39,8 @@ public:
     void MakeFolder(const std::string &path);
     void RenamePath(const std::string &from, const std::string &to);
     Json ListApps();                                       // [{bundle, name, version, type, path}]
-    void InstallApp(const fs::path &ipa, const std::function<void(const std::string &)> &progress);
+    // `unpackedBytes` (ipa.h) lets progress show the unpacking; 0 if unknown.
+    void InstallApp(const fs::path &ipa, uint64_t unpackedBytes, const std::function<void(const std::string &)> &progress);
 
     // The system log, a line at a time, on a library thread.
     void StartSyslog(std::function<void(const std::string &)> onLine);
