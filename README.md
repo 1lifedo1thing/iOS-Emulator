@@ -48,10 +48,12 @@ The program finds the `resources` folder next to it or in a parent folder, so it
    | R, or the Rotate button | Portrait or landscape: the device turns, and apps that support landscape turn with it |
    | Arrow keys | Tilt the device (for games steered by tilting) |
    | The box under the device | Types text into iOS |
+   | F2 | Controls mode on or off: keys hold fingers on the screen |
    | F11 | Fullscreen (F11 or Esc leaves it) |
 
    The toolbar under the device has Rotate, Pause, Screenshot, Fullscreen, Sound, Internet, Web proxy and
-   Stop; hover a button to see what it does.
+   Stop; hover a button to see what it does. The row under it shows the keyboard's mode and has **Edit
+   controls**.
 3. **Stop** shuts iOS down cleanly, like sliding to power off. Each device keeps its own storage; the
    prepared system is never changed, and **Erase** brings a device back to it.
 
@@ -61,10 +63,27 @@ fade out a few seconds after the mouse stops.
 
 **Typing**: tap a text field in iOS, then type in the box under the device. The text goes straight
 into the field through `it_typein`, a small library the guest tools load into every app (iOS 3 to 7),
-so any character works and Enter acts as Return. With **Send keyboard input to iOS** on (in Settings),
+so any character works and Enter acts as Return. With the keyboard in **Typing** mode (in Settings),
 what you type while a device is on screen (characters, Backspace and Enter) goes to iOS the same way,
 and the shortcuts above take Ctrl (Ctrl+H for Home, Ctrl with the arrow keys to tilt, and so on).
 Devices prepared before typing used `it_typein` don't have it: prepare them again to type.
+
+**Controls** turn keys into fingers, for games: holding a bound key presses a finger at its spot on
+the screen, releasing it lifts the finger, and holding several keys gives several fingers (up to 5
+at once, the touch panel's limit, counting the mouse). F2 turns **Controls** mode on and off (or choose it in
+Settings), and the shortcuts take Ctrl there too.
+
+| In the editor (**Edit controls** under the device, or click the Controls badge) | Does |
+| --- | --- |
+| **Add Tap** / **Add Multi-finger tap** | Places a control at the centre, then asks for its key |
+| Drag a circle | Moves the control |
+| Right-click a circle | Change its key, delete it, and set a multi-finger tap's fingers and spread |
+
+Portrait and landscape have separate layouts, each device has its own, and the mouse still works on
+the rest of the screen while you edit. Outside the editor, faint labels show the controls (**Show
+controls** in Settings). A key must be pressed again after the mode changes, the device rotates, or
+the window loses focus. The controls are saved to `keymap.json` in the device's folder, which Erase
+leaves alone.
 
 ### Internet and the web proxy
 
@@ -164,6 +183,7 @@ iOS-Emulator.exe (the window)                 iOS-Emulator.exe --worker (one per
 | --- | --- |
 | `src/main.cpp` | Entry point and the command-line modes |
 | `src/ui.cpp` | The window: device list, the device and its toolbar, fullscreen, Add Device (grid and version wheel), developer panel, settings |
+| `src/keymap.cpp` | Keys that hold fingers on the screen: the layouts, `keymap.json`, where a control's fingers land |
 | `src/skin.cpp` | The pictured devices: draws `resources\skins\*.svg` (with nanosvg), turned for landscape, with working buttons |
 | `src/session.cpp` | A running device as the window sees it: starts the helpers, reads frames and events |
 | `src/worker.cpp` | The worker process: runs the engine, sound, commands, typing (through `it_typein`) |
@@ -178,7 +198,7 @@ iOS-Emulator.exe (the window)                 iOS-Emulator.exe --worker (one per
 ### Where things are
 
 `%LOCALAPPDATA%\iOS-Emulator` holds `library\records\<id>\` (one folder per device: `base\` as prepared,
-`state\` with everything it wrote, `snapshots\`, `record.json`), `pairing\` (USB pairing records), `network\<id>\`
+`state\` with everything it wrote, `snapshots\`, `keymap.json`, `record.json`), `pairing\` (USB pairing records), `network\<id>\`
 (each device's web proxy certificate), `logs\` (`app.log`, `worker-*.log`, `usbmuxd-*.log`,
 `firmwarekit.log`) and `settings.json`. Screenshots go to `Pictures\iOS-Emulator`.
 

@@ -252,6 +252,7 @@ void Session::HandleEvent(const Json &event) {
         screenWidth = event.value("width", 320);
         screenHeight = event.value("height", 480);
         capabilities = event.value("capabilities", uint64_t(0));
+        maxContacts = event.value("maxContacts", 1);
     } else if (kind == "status") {
         state = event.value("state", state);
         paused = state == "paused";

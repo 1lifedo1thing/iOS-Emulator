@@ -10,6 +10,11 @@
 //
 // Commands (UI -> worker), each a JSON object with a "cmd" field:
 //   {"cmd":"touch","contacts":[{"id":1,"phase":0,"x":0.5,"y":0.5}]}   phase: 0 down, 1 move, 2 up, 3 cancel
+//                                             Only the fingers that changed; the others stay as they are.
+//                                             At most 8 changes, and the engine takes or refuses them as
+//                                             one: going over the board's maxContacts fingers, or a move
+//                                             or down while paused, loses the whole command (ups work
+//                                             while paused). Put ups first, so their slots are free.
 //   {"cmd":"button","button":0,"down":true}                           0 Home, 1 Sleep/Wake, 2 Vol+, 3 Vol-
 //   {"cmd":"motion","x":0,"y":0,"z":9.8}      accelerometer, m/s^2, portrait axes (x right, y up, z out of
 //                                             the screen; at rest it points up: lying flat is z 9.8, standing
@@ -45,7 +50,7 @@
 // of shutting iOS down.
 //
 // Events (worker -> UI), each with an "event" field:
-//   board   {machine, width, height, capabilities}       once, before booting
+//   board   {machine, width, height, capabilities, maxContacts}   once, before booting
 //   status  {state: starting|running|paused|stopping, sleeping, agent}   when it changes
 //   reply   {id, ok, error?, result?}                     the answer to a developer request
 //   progress {id, text}                                   how a long request (an app install) is going

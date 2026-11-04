@@ -4,6 +4,7 @@
 #include "library.h"
 #include "engine.h"
 #include "firmware.h"
+#include "keymap.h"
 #include "session.h"
 #include "skin.h"
 
@@ -36,6 +37,14 @@ namespace {
 
 // ---- Settings --------------------------------------------------------------------------------
 
+// What the keyboard does while a device is on screen.
+enum class KeyboardMode {
+    Shortcuts,   // the hardware shortcuts
+    Typing,      // what you type goes to iOS; the shortcuts take Ctrl
+    Controls,    // keys hold fingers on the screen (keymap.h); the shortcuts take Ctrl
+};
+const char *const kKeyboardModes[] = {"Shortcuts", "Typing", "Controls"};   // by KeyboardMode
+
 // The app's preferences, kept in <data>\settings.json.
 struct Settings {
     bool internet = false;     // new sessions start with guest internet on
@@ -44,11 +53,26 @@ struct Settings {
     bool muted = false;
     bool smooth = true;        // smooth scaling of the screen (off: sharp pixels)
     bool tilt = true;          // arrow keys tilt the device
-    bool sendKeys = false;     // what you type goes to iOS (the hardware shortcuts then take Ctrl)
+    KeyboardMode keyboard = KeyboardMode::Shortcuts;
+    KeyboardMode beforeControls = KeyboardMode::Shortcuts;   // the mode F2 goes back to
+    bool showControls = true;  // faint labels show where the controls are, in Controls mode
     bool devTools = false;     // the developer tools show beside a running device
     std::string selected;      // the device selected last
 
     static fs::path File() { return DataDir() / "settings.json"; }
+
+    static KeyboardMode ModeNamed(const std::string &name, KeyboardMode otherwise) {
+        for (int mode = 0; mode < int(std::size(kKeyboardModes)); mode++)
+            if (name == kKeyboardModes[mode])
+                return KeyboardMode(mode);
+        return otherwise;
+    }
+
+    void SetKeyboard(KeyboardMode mode) {
+        if (keyboard != KeyboardMode::Controls)
+            beforeControls = keyboard;
+        keyboard = mode;
+    }
 
     void Load() {
         try {
@@ -59,7 +83,10 @@ struct Settings {
             muted = j.value("muted", muted);
             smooth = j.value("smooth", smooth);
             tilt = j.value("tilt", tilt);
-            sendKeys = j.value("sendKeys", sendKeys);
+            const KeyboardMode old = j.value("sendKeys", false) ? KeyboardMode::Typing : keyboard;   // before the modes
+            keyboard = ModeNamed(j.value("keyboard", ""), old);
+            beforeControls = ModeNamed(j.value("beforeControls", ""), beforeControls);
+            showControls = j.value("showControls", showControls);
             devTools = j.value("devTools", devTools);
             selected = j.value("selected", selected);
         } catch (...) {
@@ -68,14 +95,24 @@ struct Settings {
     }
 
     void Save() const {
-        Json j = {{"internet", internet}, {"webProxy", webProxy}, {"headphones", headphones},
-                  {"muted", muted},       {"smooth", smooth},     {"tilt", tilt},
-                  {"sendKeys", sendKeys}, {"devTools", devTools}, {"selected", selected}};
+        Json j = {{"internet", internet},
+                  {"webProxy", webProxy},
+                  {"headphones", headphones},
+                  {"muted", muted},
+                  {"smooth", smooth},
+                  {"tilt", tilt},
+                  {"keyboard", kKeyboardModes[int(keyboard)]},
+                  {"beforeControls", kKeyboardModes[int(beforeControls)]},
+                  {"showControls", showControls},
+                  {"devTools", devTools},
+                  {"selected", selected}};
         SaveFile(File(), j.dump(2));
     }
 
-    // The keys of a hardware shortcut, as shown in tooltips: "H", or "Ctrl+H" while keys go to iOS.
-    std::string Shortcut(const char *keys) const { return (sendKeys ? "Ctrl+" : "") + std::string(keys); }
+    bool ShortcutsTakeCtrl() const { return keyboard != KeyboardMode::Shortcuts; }
+
+    // The keys of a hardware shortcut, as shown in tooltips: "H", or "Ctrl+H" when the keys do something else.
+    std::string Shortcut(const char *keys) const { return (ShortcutsTakeCtrl() ? "Ctrl+" : "") + std::string(keys); }
 };
 
 // ---- Motion ----------------------------------------------------------------------------------
@@ -223,6 +260,7 @@ const char *const kRotate = "", *const kPause = "", *const kPlay = "", 
                   *const kGlobe = "", *const kLock = "", *const kStop = "", *const kCode = "",
                   *const kLeft = "", *const kRight = "";
 const char *const kRecord = "\xEE\x9F\x88";   // U+E7C8
+const char *const kEdit = "\xEE\x9C\x8F";     // U+E70F
 }
 
 // A toolbar button: its icon (or `name`, without the icon font), drawn highlighted while `on`, and in
@@ -435,6 +473,15 @@ void DrumPicker(const char *id, const std::vector<WheelRow> &rows, int &selected
 
 // ---- The app ---------------------------------------------------------------------------------
 
+// A finger on the screen, as shown. Each has a fixed id, because the engine follows fingers by id:
+// the mouse, its Alt mirror, then every finger of every control.
+struct Finger {
+    int id;
+    ImVec2 at;
+};
+constexpr int kMouseFinger = 1, kAltFinger = 2, kFirstKeyFinger = 3;
+int KeyFinger(int control, int finger) { return kFirstKeyFinger + control * kMaxRowFingers + finger; }
+
 class App {
 public:
     App() {
@@ -488,10 +535,19 @@ private:
     void DevToolsTab(ImVec2 at, float height);
     ImVec2 ScreenSize(Session &session, bool &turned);
     void DrawScreen(Session &session, ImVec2 origin, ImVec2 size, Orientation orientation);
-    void ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, Orientation orientation, bool turned);
+    void ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, ImVec2 pixels, Orientation orientation, bool turned);
+    void KeyFingers(Session &session, const Layout &layout, ImVec2 pixels, std::vector<Finger> &fingers);
+    void SendFingers(Session &session, std::vector<Finger> fingers, Orientation orientation, bool turned);
+    void WatchHeldInput(Session *shown);
+    void ReleaseHeldInput();
     void FullscreenView(Session &session);
     void FullscreenControls(Session &session);
     void Controls(Session &session);
+    void KeyboardBadge();
+    void ControlEditor(const Device &device, Layout &layout, ImVec2 origin, ImVec2 size, ImVec2 pixels);
+    void ControlPopup(const Device &device, std::vector<Control> &controls);
+    void AddControl(const Device &device, ControlType type);
+    void SaveKeymap(const Device &device);
     void HardwareKeys(Session &session);
     void SendKeys(Session &session);
     void SaveScreenshot(Session &session);
@@ -527,11 +583,27 @@ private:
 
     // Input state for the device on screen.
     bool touching_ = false, twoFingers_ = false;
-    ImVec2 lastTouch_{-1, -1};
+    std::map<int, ImVec2> fingers_;                      // what iOS has down: finger id -> panel position
+    std::vector<int> heldControls_;                      // the controls whose keys are held, oldest press first
     std::set<int> heldButtons_;                          // held from the keyboard
+    std::set<int> ignoredButtons_;                       // released for the user: their keys must come up first
     Motion motion_;
     std::map<std::string, Orientation> orientations_;    // turned devices, by id (each start is portrait)
     std::string typeText_, renameText_;
+
+    // What the input above was held for (WatchHeldInput).
+    std::string heldDevice_;
+    KeyboardMode heldMode_ = KeyboardMode::Shortcuts;
+    Orientation heldOrientation_ = Orientation::Portrait;
+    bool heldEditing_ = false;
+
+    // Key-to-touch mapping: each running device's keymap, and the editor's state.
+    std::map<std::string, Keymap> keymaps_;              // by id, loaded when the device starts
+    bool editing_ = false;                               // the editor is showing
+    bool editorPopup_ = false;                           // its popup is open, so keys don't reach iOS
+    bool openPopup_ = false;                             // open it on the next frame
+    bool askingKey_ = false;                             // it's waiting for a key
+    int chosenControl_ = -1;                             // the control it's for
 
     // Fullscreen: only the selected device's screen, with controls that show while the mouse moves.
     bool fullscreen_ = false;
@@ -602,6 +674,7 @@ void App::StartDevice(const Device &device) {
         options.headphones = settings_.headphones;
         options.muted = settings_.muted;
         sessions_[device.id] = std::make_unique<Session>(device, options);
+        keymaps_[device.id] = Keymap::Load(device.KeymapFile());
         error_.clear();
     } catch (const std::exception &e) {
         error_ = std::string("Couldn't start ") + device.name + ": " + e.what();
@@ -624,6 +697,7 @@ void App::UpdateSessions() {
             textures_[it->first].Release();
             textures_.erase(it->first);
             orientations_.erase(it->first);   // it starts upright next time
+            keymaps_.erase(it->first);
             it = sessions_.erase(it);
         } else {
             ++it;
@@ -650,12 +724,25 @@ void App::Frame() {
     // Fullscreen shows the device on screen: F11 toggles it, Esc leaves it, and it ends with the device.
     Device *shownDevice = page_ == Page::Device ? Selected() : nullptr;
     Session *shown = shownDevice ? SessionFor(*shownDevice) : nullptr;
-    if (ImGui::IsKeyPressed(ImGuiKey_F11, false) && !fullscreen_)
-        EnterFullscreen();
-    else if (ImGui::IsKeyPressed(ImGuiKey_F11, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+    if (ImGui::IsKeyPressed(ImGuiKey_F11, false) && !fullscreen_) {
+        if (!editorPopup_)
+            EnterFullscreen();
+    } else if (ImGui::IsKeyPressed(ImGuiKey_F11, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
         fullscreen_ = false;
+    }
     if (!shown || closing_)
         fullscreen_ = false;
+    if (fullscreen_)
+        editing_ = false;   // its buttons are under the device
+
+    // F2 turns Controls mode on and off while a device is on screen.
+    if (shown && ImGui::IsKeyPressed(ImGuiKey_F2, false) && !ImGui::GetIO().WantTextInput && !editorPopup_) {
+        const bool on = settings_.keyboard == KeyboardMode::Controls;
+        settings_.SetKeyboard(on ? settings_.beforeControls : KeyboardMode::Controls);
+        settings_.Save();
+    }
+    WatchHeldInput(shown);
+
     if (fullscreen_) {
         FullscreenView(*shown);
         return;
@@ -1017,7 +1104,8 @@ ImVec2 App::ScreenSize(Session &session, bool &turned) {
 // touchable.
 void App::DrawScreen(Session &session, ImVec2 screen, ImVec2 screenSize, Orientation orientation) {
     bool turned;
-    ScreenSize(session, turned);
+    const ImVec2 upright = ScreenSize(session, turned);
+    const ImVec2 pixels = orientation == Orientation::Landscape ? ImVec2(upright.y, upright.x) : upright;
     const Texture &texture = textures_[session.GetDevice().id];
     ImDrawList *draw = ImGui::GetWindowDrawList();
     const ImVec2 screenEnd(screen.x + screenSize.x, screen.y + screenSize.y);
@@ -1036,48 +1124,186 @@ void App::DrawScreen(Session &session, ImVec2 screen, ImVec2 screenSize, Orienta
         draw->AddText(ImVec2(screen.x + (screenSize.x - size.x) / 2, screen.y + (screenSize.y - size.y) / 2),
                       IM_COL32(200, 200, 200, 255), text);
     }
-    ScreenTouch(session, screen, screenSize, orientation, turned);
+    ScreenTouch(session, screen, screenSize, pixels, orientation, turned);
 }
 
-// The mouse is a finger: press, drag and release on the screen. Hold Alt while dragging for a
-// second, mirrored finger (pinch and rotate), on boards with multi-touch.
-void App::ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, Orientation orientation, bool turned) {
+// A control's fingers in window pixels, for the screen at `origin`, `size` big and `pixels` wide and tall.
+std::vector<ImVec2> ControlSpots(const Control &control, ImVec2 origin, ImVec2 size, ImVec2 pixels) {
+    std::vector<ImVec2> spots = FingerSpots(control, pixels);
+    for (ImVec2 &spot : spots)
+        spot = ImVec2(origin.x + spot.x * size.x, origin.y + spot.y * size.y);
+    return spots;
+}
+
+// Draws a control over the screen: a ring for each finger, and its key's name, with the finger
+// count on a row. `opacity` makes it faint while playing and solid in the editor.
+void DrawControl(ImDrawList *draw, const Control &control, const std::vector<ImVec2> &spots, ImVec4 ink, float opacity) {
+    const float radius = ImGui::GetFontSize() * 1.1f;
+    const ImU32 ring = ImGui::GetColorU32(ImVec4(ink.x, ink.y, ink.z, opacity));
+    const ImU32 shade = IM_COL32(0, 0, 0, int(120 * opacity));
+    for (const ImVec2 &spot : spots) {
+        draw->AddCircleFilled(spot, radius, shade);
+        draw->AddCircle(spot, radius, ring, 0, 2);
+    }
+    std::string label = control.key == ImGuiKey_None ? "?" : ImGui::GetKeyName(control.key);
+    if (control.type == ControlType::MultiTap)
+        label += " x" + std::to_string(control.fingers);
+    const ImVec2 middle((spots.front().x + spots.back().x) / 2, spots.front().y);
+    const ImVec2 text = ImGui::CalcTextSize(label.c_str());
+    const ImVec2 at(middle.x - text.x / 2, middle.y - text.y / 2);
+    draw->AddRectFilled(ImVec2(at.x - 3, at.y), ImVec2(at.x + text.x + 3, at.y + text.y), shade, 3);
+    draw->AddText(at, ImGui::GetColorU32(ImVec4(1, 1, 1, opacity)), label.c_str());
+}
+
+// Everything that touches the screen, gathered into one list each frame. The mouse is a finger:
+// press, drag and release on the screen. Hold Alt while dragging for a second, mirrored finger
+// (pinch and rotate), on boards with multi-touch. In Controls mode, the keys bound to controls are
+// fingers too. The editor's circles come first, which gives them the mouse before the screen.
+void App::ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, ImVec2 pixels, Orientation orientation, bool turned) {
+    const Device &device = session.GetDevice();
+    Layout &layout = keymaps_[device.id].For(orientation);
+    if (editing_) {
+        ControlEditor(device, layout, origin, size, pixels);
+    } else if (settings_.keyboard == KeyboardMode::Controls && settings_.showControls && !session.sleeping) {
+        for (const Control &control : layout.controls)
+            DrawControl(ImGui::GetWindowDrawList(), control, ControlSpots(control, origin, size, pixels), ImVec4(1, 1, 1, 1), 0.4f);
+    }
+
     ImGui::SetCursorScreenPos(origin);
     ImGui::InvisibleButton("screen", size);
     const ImVec2 mouse = ImGui::GetIO().MousePos;
     const float x = std::clamp((mouse.x - origin.x) / size.x, 0.0f, 1.0f);
     const float y = std::clamp((mouse.y - origin.y) / size.y, 0.0f, 1.0f);
-    // The engine wants the panel's own coordinates, before the device's turn and the panel's.
-    auto contact = [&](int id, int phase, float u, float v) {
-        const ImVec2 panel = ToPanel(ImVec2(u, v), orientation, turned);
-        return Json{{"id", id}, {"phase", phase}, {"x", panel.x}, {"y", panel.y}};
-    };
-    auto send = [&](int phase) {
-        Json contacts = Json::array({contact(1, phase, x, y)});
-        if (twoFingers_)
-            contacts.push_back(contact(2, phase, 1 - x, 1 - y));
-        session.Send({{"cmd", "touch"}, {"contacts", contacts}});
-        lastTouch_ = ImVec2(x, y);
-    };
     // While iOS has the display off, its touch panel is off too: a click wakes it with Home instead.
     if (ImGui::IsItemActivated() && session.sleeping) {
         session.Send({{"cmd", "button"}, {"button", QEMU_IOS_BUTTON_HOME}, {"down", true}});
         session.Send({{"cmd", "button"}, {"button", QEMU_IOS_BUTTON_HOME}, {"down", false}});
-    } else if (ImGui::IsItemActivated()) {
+    } else if (ImGui::IsItemActivated() && !session.paused) {
         touching_ = true;
         twoFingers_ = ImGui::GetIO().KeyAlt && (session.capabilities & QEMU_IOS_CAP_MULTITOUCH);
-        send(QEMU_IOS_TOUCH_BEGIN);
-    } else if (touching_ && ImGui::IsItemActive()) {
-        if (x != lastTouch_.x || y != lastTouch_.y)
-            send(QEMU_IOS_TOUCH_UPDATE);
-    } else if (touching_) {
-        send(QEMU_IOS_TOUCH_END);
-        touching_ = false;
     }
+    if (!ImGui::IsItemActive() || session.paused)
+        touching_ = false;
+
+    std::vector<Finger> fingers;
+    if (touching_) {
+        fingers.push_back({kMouseFinger, ImVec2(x, y)});
+        if (twoFingers_)
+            fingers.push_back({kAltFinger, ImVec2(1 - x, 1 - y)});
+    }
+    KeyFingers(session, layout, pixels, fingers);
+    SendFingers(session, fingers, orientation, turned);
+
     if (twoFingers_ && touching_) {   // show where the second finger is
         ImGui::GetWindowDrawList()->AddCircle(ImVec2(origin.x + (1 - x) * size.x, origin.y + (1 - y) * size.y), 10,
                                               IM_COL32(255, 255, 255, 160), 0, 2);
     }
+}
+
+// Adds the fingers of the keys held down to `fingers`, oldest press first. A key counts from the
+// moment it's pressed in Controls mode: one held through a rotation, say, must be pressed again.
+void App::KeyFingers(Session &session, const Layout &layout, ImVec2 pixels, std::vector<Finger> &fingers) {
+    const ImGuiIO &io = ImGui::GetIO();
+    const bool live = settings_.keyboard == KeyboardMode::Controls && !editing_ && !io.WantTextInput &&
+                      session.state == "running" && !session.paused && !session.sleeping && !session.Stopping();
+    if (!live) {
+        heldControls_.clear();
+        return;
+    }
+    const std::vector<Control> &controls = layout.controls;
+    heldControls_.erase(std::remove_if(heldControls_.begin(), heldControls_.end(),
+                                       [&](int control) { return !ImGui::IsKeyDown(controls[control].key); }),
+                        heldControls_.end());
+    for (int control = 0; control < int(controls.size()); control++) {
+        const ImGuiKey key = controls[control].key;
+        const bool ctrl = key == ImGuiKey_LeftCtrl || key == ImGuiKey_RightCtrl;
+        if (key != ImGuiKey_None && ImGui::IsKeyPressed(key, false) && (ctrl || !io.KeyCtrl))   // Ctrl+key is a shortcut
+            heldControls_.push_back(control);
+    }
+
+    if (session.capabilities & QEMU_IOS_CAP_MULTITOUCH) {
+        for (int control : heldControls_) {
+            const std::vector<ImVec2> spots = FingerSpots(controls[control], pixels);
+            for (int finger = 0; finger < int(spots.size()); finger++)
+                fingers.push_back({KeyFinger(control, finger), spots[finger]});
+        }
+    } else if (fingers.empty() && !heldControls_.empty()) {   // one finger only: the key pressed last
+        const int control = heldControls_.back();
+        fingers.push_back({KeyFinger(control, 0), ImVec2(controls[control].x, controls[control].y)});
+    }
+}
+
+// Makes iOS's fingers match `fingers`: one touch command with what changed, or none. The engine
+// takes a command whole or not at all, so what it would refuse mustn't get in (worker.h).
+void App::SendFingers(Session &session, std::vector<Finger> fingers, Orientation orientation, bool turned) {
+    // Fingers already down keep their place, and new ones get what's left of the panel's limit.
+    std::stable_partition(fingers.begin(), fingers.end(), [&](const Finger &f) { return fingers_.count(f.id) > 0; });
+    if (int(fingers.size()) > session.maxContacts)
+        fingers.resize(session.maxContacts);
+
+    Json contacts = Json::array();
+    auto add = [&](int id, int phase, ImVec2 panel) {
+        contacts.push_back(Json{{"id", id}, {"phase", phase}, {"x", panel.x}, {"y", panel.y}});
+    };
+    for (auto down = fingers_.begin(); down != fingers_.end();) {   // lifted first: it frees slots for new fingers
+        const int id = down->first;
+        if (std::any_of(fingers.begin(), fingers.end(), [&](const Finger &f) { return f.id == id; })) {
+            ++down;
+        } else {
+            add(id, QEMU_IOS_TOUCH_END, down->second);
+            down = fingers_.erase(down);
+        }
+    }
+    for (const Finger &finger : fingers) {
+        if (contacts.size() == QEMU_IOS_PORTABLE_MAX_CONTACTS)
+            break;   // the rest follow next frame
+        // The engine wants the panel's own coordinates, before the device's turn and the panel's.
+        const ImVec2 panel = ToPanel(finger.at, orientation, turned);
+        const auto down = fingers_.find(finger.id);
+        if (down == fingers_.end())
+            add(finger.id, QEMU_IOS_TOUCH_BEGIN, panel);
+        else if (down->second.x != panel.x || down->second.y != panel.y)
+            add(finger.id, QEMU_IOS_TOUCH_UPDATE, panel);
+        fingers_[finger.id] = panel;
+    }
+    if (!contacts.empty())
+        session.Send({{"cmd", "touch"}, {"contacts", contacts}});
+}
+
+// Runs at the start of each frame. What's held down makes sense only for one device, keyboard mode
+// and orientation, and only while the window has the keyboard and the device runs. When any of that
+// changes, everything lifts, so nothing stays stuck down.
+void App::WatchHeldInput(Session *shown) {
+    const std::string device = shown ? shown->GetDevice().id : "";
+    const Orientation orientation = shown ? OrientationOf(shown->GetDevice()) : Orientation::Portrait;
+    if (device != heldDevice_)
+        editing_ = false;
+    if (!editing_)
+        editorPopup_ = false;
+    if (device != heldDevice_ || settings_.keyboard != heldMode_ || orientation != heldOrientation_ ||
+        editing_ != heldEditing_ || ImGui::GetIO().AppFocusLost || (shown && shown->Stopping()))
+        ReleaseHeldInput();
+    heldDevice_ = device;
+    heldMode_ = settings_.keyboard;
+    heldOrientation_ = orientation;
+    heldEditing_ = editing_;
+}
+
+// Lifts every finger and releases every hardware button held from the keyboard. Their keys may still
+// be down, so a button is ignored until its key comes up (a Home that pressed itself again would be
+// a double click).
+void App::ReleaseHeldInput() {
+    const auto found = sessions_.find(heldDevice_);
+    if (found != sessions_.end()) {
+        SendFingers(*found->second, {}, Orientation::Portrait, false);
+        for (int button : heldButtons_)
+            found->second->Send({{"cmd", "button"}, {"button", button}, {"down", false}});
+    }
+    fingers_.clear();
+    heldControls_.clear();
+    touching_ = false;
+    ignoredButtons_.insert(heldButtons_.begin(), heldButtons_.end());
+    heldButtons_.clear();
 }
 
 // ---- Fullscreen ------------------------------------------------------------------------------
@@ -1242,11 +1468,11 @@ void App::FullscreenControls(Session &session) {
 // ---- Keyboard --------------------------------------------------------------------------------
 
 // The hardware shortcuts: H Home, P Sleep/Wake, + and - volume (held while the key is), R rotates,
-// arrows tilt. While what you type goes to iOS (the "Send keyboard input to iOS" setting), they take Ctrl.
+// arrows tilt. In Typing and Controls modes the keys do something else, so these take Ctrl.
 void App::HardwareKeys(Session &session) {
     const ImGuiIO &io = ImGui::GetIO();
-    const bool typing = io.WantTextInput;
-    const bool modifiers = io.KeyCtrl == settings_.sendKeys && !io.KeyAlt && !io.KeyShift;
+    const bool typing = io.WantTextInput || editorPopup_ || session.Stopping();
+    const bool modifiers = io.KeyCtrl == settings_.ShortcutsTakeCtrl() && !io.KeyAlt && !io.KeyShift;
     auto key = [&](ImGuiKey k) { return !typing && modifiers && ImGui::IsKeyDown(k); };
     const std::pair<bool, int> buttons[] = {
         {key(ImGuiKey_H), QEMU_IOS_BUTTON_HOME},
@@ -1255,7 +1481,9 @@ void App::HardwareKeys(Session &session) {
         {key(ImGuiKey_Minus) || key(ImGuiKey_KeypadSubtract), QEMU_IOS_BUTTON_VOLUME_DOWN},
     };
     for (const auto &[down, button] : buttons) {
-        if (down == bool(heldButtons_.count(button)))
+        if (!down)
+            ignoredButtons_.erase(button);
+        if (down == bool(heldButtons_.count(button)) || ignoredButtons_.count(button))
             continue;
         if (down)
             heldButtons_.insert(button);
@@ -1280,12 +1508,12 @@ void App::Rotate(const Device &device) {
         OrientationOf(device) == Orientation::Portrait ? Orientation::Landscape : Orientation::Portrait;
 }
 
-// With "Send keyboard input to iOS" on, what you type goes to iOS while no text box here has focus:
-// the characters as typed (Shift and AltGr included), Backspace and Enter. The worker types them
-// into the text field that has focus in iOS (worker.h, "type").
+// In Typing mode, what you type goes to iOS while no text box here has focus: the characters as
+// typed (Shift and AltGr included), Backspace and Enter. The worker types them into the text field
+// that has focus in iOS (worker.h, "type").
 void App::SendKeys(Session &session) {
     const ImGuiIO &io = ImGui::GetIO();
-    if (!settings_.sendKeys || io.WantTextInput)
+    if (settings_.keyboard != KeyboardMode::Typing || io.WantTextInput || editorPopup_)
         return;
     std::wstring text;
     for (ImWchar c : io.InputQueueCharacters)
@@ -1304,7 +1532,8 @@ void App::SendKeys(Session &session) {
 }
 
 // The toolbar under the device: Rotate, Pause, Screenshot, Record, Fullscreen | Sound, Internet, Web
-// proxy | Stop, with the box for typing into iOS under it. The hardware buttons are on the device itself.
+// proxy | Stop. Under it is the keyboard's row: its mode, Edit controls, and the box for typing into
+// iOS (or, in the editor, the buttons that add controls). The hardware buttons are on the device itself.
 void App::Controls(Session &session) {
     const bool ready = session.state == "running" || session.state == "paused";
     const ImGuiStyle &style = ImGui::GetStyle();
@@ -1329,8 +1558,10 @@ void App::Controls(Session &session) {
     ImGui::SameLine();
     ImGui::BeginDisabled(!ready);
     if (IconButton(session.paused ? icon::kPlay : icon::kPause, names[1], session.paused ? "Resume" : "Pause",
-                   session.paused))
-        session.Send({{"cmd", "pause"}, {"paused", !session.paused}});
+                   session.paused)) {
+        session.paused = !session.paused;   // at once: no finger may start once the engine has stopped
+        session.Send({{"cmd", "pause"}, {"paused", session.paused}});
+    }
     ImGui::SameLine();
     if (IconButton(icon::kCamera, "Screenshot", "Save a screenshot to Pictures\\iOS-Emulator"))
         SaveScreenshot(session);
@@ -1385,13 +1616,28 @@ void App::Controls(Session &session) {
             session.Stop();
     }
 
-    // Typing: the worker types the text into the text field that has focus in iOS (worker.h,
-    // "type"). A (!) after the box tells what couldn't be typed.
-    ImGui::BeginDisabled(!ready);
     const char *problemMark = "(!)";
     const float rowWidth = std::min(ImGui::GetContentRegionAvail().x, std::max(width, ImGui::GetFontSize() * 24));
     CenterRow(rowWidth);
-    float reserve = ImGui::CalcTextSize("Type").x + ImGui::GetStyle().FramePadding.x * 2 + 8;
+    const float rowStart = ImGui::GetCursorScreenPos().x;
+    KeyboardBadge();
+    ImGui::SameLine();
+    if (editing_) {
+        const Device &device = session.GetDevice();
+        if (ImGui::Button("Add Tap"))
+            AddControl(device, ControlType::Tap);
+        Tooltip("A key that holds one finger on the screen.");
+        ImGui::SameLine();
+        if (ImGui::Button("Add Multi-finger tap"))
+            AddControl(device, ControlType::MultiTap);
+        Tooltip("A key that holds several fingers on the screen, in a row.");
+        return;
+    }
+
+    // Typing: the worker types the text into the text field that has focus in iOS (worker.h,
+    // "type"). A (!) after the box tells what couldn't be typed.
+    ImGui::BeginDisabled(!ready);
+    float reserve = ImGui::GetCursorScreenPos().x - rowStart + ButtonWidth("Type") + 8;
     if (!session.typingProblem.empty())
         reserve += ImGui::CalcTextSize(problemMark).x + 8;
     ImGui::SetNextItemWidth(rowWidth - reserve);
@@ -1409,6 +1655,160 @@ void App::Controls(Session &session) {
         ImGui::SameLine();
         ImGui::TextColored(kWarn, "%s", problemMark);
         Tooltip(session.typingProblem.c_str());
+    }
+}
+
+// The keyboard's mode, and Edit controls. In Controls mode the badge opens the editor too.
+void App::KeyboardBadge() {
+    const bool controls = settings_.keyboard == KeyboardMode::Controls;
+    if (controls) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.19f, 0.33f, 0.56f, 1));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.40f, 0.66f, 1));
+    }
+    bool toggle = ImGui::Button(kKeyboardModes[int(settings_.keyboard)]) && controls;
+    if (controls)
+        ImGui::PopStyleColor(2);
+    Tooltip(controls ? "The keyboard holds fingers on the screen, and shortcuts take Ctrl. F2 goes back. Click to edit "
+                       "the controls."
+                     : "What the keyboard does. F2 switches to Controls, where keys hold fingers on the screen. The "
+                       "other modes are in Settings.");
+    ImGui::SameLine();
+    toggle |= IconButton(icon::kEdit, "Edit controls",
+                         "Edit controls: keys that hold fingers on the screen. Drag a control to move it, and "
+                         "right-click it to change it.",
+                         editing_);
+    if (toggle)
+        editing_ = !editing_;
+}
+
+// The editor, over the screen: drag a control to move it, right-click it for its popup. The device
+// gets no touches from the controls meanwhile; the mouse still works on the rest of the screen.
+void App::ControlEditor(const Device &device, Layout &layout, ImVec2 origin, ImVec2 size, ImVec2 pixels) {
+    const ImGuiIO &io = ImGui::GetIO();
+    ImDrawList *draw = ImGui::GetWindowDrawList();
+    const float side = ImGui::GetFontSize() * 2.2f;
+    std::vector<Control> &controls = layout.controls;
+    for (int index = 0; index < int(controls.size()); index++) {
+        Control &control = controls[index];
+        const std::vector<ImVec2> spots = ControlSpots(control, origin, size, pixels);
+        bool hot = false;
+        ImGui::PushID(index);
+        for (int finger = 0; finger < int(spots.size()); finger++) {
+            ImGui::PushID(finger);
+            ImGui::SetCursorScreenPos(ImVec2(spots[finger].x - side / 2, spots[finger].y - side / 2));
+            ImGui::InvisibleButton("finger", ImVec2(side, side));
+            hot |= ImGui::IsItemHovered() || ImGui::IsItemActive();
+            if (ImGui::IsItemActive() && (io.MouseDelta.x != 0 || io.MouseDelta.y != 0)) {
+                control.x = std::clamp(control.x + io.MouseDelta.x / size.x, 0.0f, 1.0f);
+                control.y = std::clamp(control.y + io.MouseDelta.y / size.y, 0.0f, 1.0f);
+                // A row stops at the edges, and its centre with it, so it comes straight back.
+                const std::vector<ImVec2> row = FingerSpots(control, pixels);
+                control.x = (row.front().x + row.back().x) / 2;
+            }
+            if (ImGui::IsItemDeactivated())
+                SaveKeymap(device);
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                chosenControl_ = index;
+                askingKey_ = false;
+                openPopup_ = true;
+            }
+            ImGui::PopID();
+        }
+        ImGui::PopID();
+        DrawControl(draw, control, spots, hot ? kAccent : ImVec4(1, 1, 1, 1), 1);
+    }
+
+    if (openPopup_)
+        ImGui::OpenPopup("control");
+    openPopup_ = false;
+    if (ImGui::BeginPopup("control")) {
+        ControlPopup(device, controls);
+        ImGui::EndPopup();
+    }
+    editorPopup_ = ImGui::IsPopupOpen("control");
+    if (!editorPopup_) {
+        const bool chosen = chosenControl_ >= 0 && chosenControl_ < int(controls.size());
+        if (chosen && askingKey_ && controls[chosenControl_].key == ImGuiKey_None)
+            controls.erase(controls.begin() + chosenControl_);   // just added, and no key was given
+        chosenControl_ = -1;
+        askingKey_ = false;
+    }
+}
+
+// The popup of the chosen control: its key, its fingers and Delete.
+void App::ControlPopup(const Device &device, std::vector<Control> &controls) {
+    if (chosenControl_ < 0 || chosenControl_ >= int(controls.size())) {
+        ImGui::CloseCurrentPopup();
+        return;
+    }
+    Control &control = controls[chosenControl_];
+
+    if (askingKey_) {
+        ImGui::TextUnformatted("Press a key...");
+        DimText("Esc cancels");
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            if (control.key == ImGuiKey_None)
+                ImGui::CloseCurrentPopup();   // ControlEditor removes it
+            else
+                askingKey_ = false;
+            return;
+        }
+        for (int key = ImGuiKey_NamedKey_BEGIN; key < ImGuiKey_NamedKey_END; key++)
+            if (BindableKey(ImGuiKey(key)) && ImGui::IsKeyPressed(ImGuiKey(key), false)) {
+                control.key = ImGuiKey(key);
+                askingKey_ = false;
+                SaveKeymap(device);
+                break;
+            }
+        return;
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+        ImGui::CloseCurrentPopup();
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text("Key: %s", control.key == ImGuiKey_None ? "none" : ImGui::GetKeyName(control.key));
+    ImGui::SameLine();
+    if (ImGui::Button("Change key"))
+        askingKey_ = true;
+    const bool taken = std::any_of(controls.begin(), controls.end(), [&](const Control &other) {
+        return &other != &control && other.key == control.key;
+    });
+    if (taken && control.key != ImGuiKey_None)
+        ImGui::TextColored(kWarn, "Another control here uses this key.");
+    if (control.type == ControlType::MultiTap) {
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
+        ImGui::SliderInt("Fingers", &control.fingers, kMinRowFingers, kMaxRowFingers);
+        if (ImGui::IsItemDeactivatedAfterEdit())
+            SaveKeymap(device);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
+        ImGui::SliderFloat("Spread", &control.spread, kMinSpread, kMaxSpread, "%.2f");
+        if (ImGui::IsItemDeactivatedAfterEdit())
+            SaveKeymap(device);
+    }
+    if (ImGui::Button("Delete")) {
+        controls.erase(controls.begin() + chosenControl_);
+        chosenControl_ = -1;
+        SaveKeymap(device);
+        ImGui::CloseCurrentPopup();
+    }
+}
+
+// Places a new control at the centre of the screen and asks for its key. It's saved once it has one.
+void App::AddControl(const Device &device, ControlType type) {
+    std::vector<Control> &controls = keymaps_[device.id].For(OrientationOf(device)).controls;
+    Control control;
+    control.type = type;
+    controls.push_back(control);
+    chosenControl_ = int(controls.size()) - 1;
+    askingKey_ = true;
+    openPopup_ = true;
+}
+
+void App::SaveKeymap(const Device &device) {
+    try {
+        keymaps_[device.id].Save(device.KeymapFile());
+    } catch (const std::exception &e) {
+        error_ = std::string("Couldn't save the controls: ") + e.what();
     }
 }
 
@@ -1458,9 +1858,25 @@ void App::SettingsPage() {
     DimText("DISPLAY AND CONTROLS");
     changed |= ImGui::Checkbox("Smooth scaling", &settings_.smooth);
     changed |= ImGui::Checkbox("Arrow keys tilt the device", &settings_.tilt);
-    changed |= ImGui::Checkbox("Send keyboard input to iOS", &settings_.sendKeys);
-    Tooltip("What you type while a device is on screen goes into the text field that has focus in iOS "
-            "(characters, Backspace and Enter). The shortcuts then take Ctrl (Ctrl+H for Home, and so on).");
+    const char *const modeTips[] = {
+        "The keys are the hardware shortcuts listed below.",
+        "What you type while a device is on screen goes into the text field that has focus in iOS (characters, "
+        "Backspace and Enter). The shortcuts then take Ctrl (Ctrl+H for Home, and so on).",
+        "Keys hold fingers on the screen, wherever you placed them with Edit controls under the device. The "
+        "shortcuts then take Ctrl. F2 turns this mode on and off.",
+    };
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Keyboard");
+    for (int mode = 0; mode < int(std::size(kKeyboardModes)); mode++) {
+        ImGui::SameLine();
+        if (ImGui::RadioButton(kKeyboardModes[mode], settings_.keyboard == KeyboardMode(mode))) {
+            settings_.SetKeyboard(KeyboardMode(mode));
+            changed = true;
+        }
+        Tooltip(modeTips[mode]);
+    }
+    changed |= ImGui::Checkbox("Show controls", &settings_.showControls);
+    Tooltip("In Controls mode, faint labels on the screen show which key is where.");
     if (changed)
         settings_.Save();
 
@@ -1468,15 +1884,17 @@ void App::SettingsPage() {
     DimText("CONTROLS");
     ImGui::BulletText("Click and drag on the screen to touch. Hold Alt while dragging to pinch or rotate.");
     ImGui::BulletText("The device's buttons work: click Home, Sleep/Wake or the volume keys (hold them as on the real one).");
-    if (settings_.sendKeys) {
-        ImGui::BulletText("What you type goes to iOS while a device is on screen.");
+    if (settings_.ShortcutsTakeCtrl()) {
+        ImGui::BulletText(settings_.keyboard == KeyboardMode::Typing
+                              ? "What you type goes to iOS while a device is on screen."
+                              : "Keys hold fingers on the screen, as placed with Edit controls under the device.");
         ImGui::BulletText("Ctrl+H: Home, Ctrl+P: Sleep/Wake, Ctrl with + and -: volume, Ctrl+R: rotate, "
                           "Ctrl with the arrow keys: tilt.");
     } else {
         ImGui::BulletText("H: Home, P: Sleep/Wake, + and -: volume, R: rotate, arrow keys: tilt.");
         ImGui::BulletText("Type text into iOS with the box under the device.");
     }
-    ImGui::BulletText("F11: fullscreen. F11 or Esc leaves it.");
+    ImGui::BulletText("F2: Controls mode on and off. F11: fullscreen. F11 or Esc leaves it.");
     ImGui::Spacing();
     DimText("FOLDERS");
     ImGui::Text("Data: %s", PathText(DataDir()).c_str());

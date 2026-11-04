@@ -3,7 +3,8 @@
 //
 //   <data>\library\records\<id>\
 //       record.json   name, board, iOS build
-//       base\         the prepared system from firmwarekit; never written after preparation
+//       keymap.json   the keys that hold fingers on the screen (keymap.h); Erase keeps it
+//       base\        the prepared system from firmwarekit; never written after preparation
 //       state\        everything the device writes: its NAND overlay, NOR copy, logs
 //       assets\       extra boot files (the boot ROM for the oldest boards)
 //       snapshots\<name>\   saved machines for quick test runs: machine.state + a copy of state\
@@ -24,6 +25,7 @@ struct Device {
     fs::path State() const { return stateDir.empty() ? dir / "state" : stateDir; }
     fs::path Assets() const { return dir / "assets"; }
     fs::path Snapshot(const std::string &name) const { return dir / "snapshots" / name; }
+    fs::path KeymapFile() const { return dir / "keymap.json"; }
 
     Json Lock() const;                // base\device.lock.json, the facts firmwarekit recorded
     std::string Product() const;      // "iPod touch 3G"

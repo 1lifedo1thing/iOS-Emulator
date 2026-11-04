@@ -241,7 +241,8 @@ int Worker::Run() {
           {"machine", board.machine},
           {"width", board.width},
           {"height", board.height},
-          {"capabilities", board.capabilities}});
+          {"capabilities", board.capabilities},
+          {"maxContacts", board.max_contacts}});
 
     BootOptions options;
     options.machine = board.machine;

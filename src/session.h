@@ -57,6 +57,7 @@ public:
     int agent = 0;                    // guest tools: 0 not running, 1 alive, 2 not answering
     int screenWidth = 320, screenHeight = 480;
     uint64_t capabilities = 0;        // QEMU_IOS_CAP_* bits
+    int maxContacts = 1;              // fingers the touch panel can hold at once
     std::string machine;
     bool paused = false, muted = false, internet = false, webProxy = true;
     std::string proxyStatus;          // how setting up the web proxy went (the latest "proxy" event)
