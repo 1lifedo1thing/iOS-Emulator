@@ -5,9 +5,6 @@ emulated with [qemu-ios](https://github.com/blake-lucas/qemu-ios). Devices can b
 when they're prepared, and the app exposes the device to developers: its whole filesystem, a root
 terminal, app installs, the system log and SSH, so tweaks can be built and tested without the hardware.
 
-It is a small C++ take on [LightTouch](https://github.com/blake-lucas/LightTouch): the same engine and
-preparation tool, driven by a Dear ImGui app.
-
 It is heavily WIP and still has bugs.
 
 ## Requirements
@@ -16,18 +13,6 @@ It is heavily WIP and still has bugs.
 - A GPU with a real OpenGL driver (the guest's 3D graphics run on it)
 - Internet access to download iOS (from Apple or archive.org) and, for jailbroken devices, Cydia's files
 - To build: Visual Studio 2026 with the C++ desktop workload (toolset v145)
-
-## Building and running
-
-Open `iOS-Emulator.slnx` in Visual Studio and build **x64**, or from a Developer Command Prompt:
-
-```
-msbuild iOS-Emulator.vcxproj -p:Configuration=Release -p:Platform=x64
-build\Release\iOS-Emulator.exe
-```
-
-The program finds the `resources` folder next to it or in a parent folder, so it runs straight from
-`build\Release`. To ship it, copy `iOS-Emulator.exe` and `resources\` into one folder.
 
 ## Using it
 
@@ -98,6 +83,18 @@ app installs in it (each device gets its own, kept in `%LOCALAPPDATA%\iOS-Emulat
 With the web proxy off, bytes pass through untouched and iOS talks to websites itself, so mostly plain
 `http` sites and Cydia's repositories work. The proxy never connects to your own computer or local
 network.
+
+## Building and running
+
+Open `iOS-Emulator.slnx` in Visual Studio and build **x64**, or from a Developer Command Prompt:
+
+```
+msbuild iOS-Emulator.vcxproj -p:Configuration=Release -p:Platform=x64
+build\Release\iOS-Emulator.exe
+```
+
+The program finds the `resources` folder next to it or in a parent folder, so it runs straight from
+`build\Release`. To ship it, copy `iOS-Emulator.exe` and `resources\` into one folder.
 
 ## Developer tools
 
@@ -203,6 +200,19 @@ iOS-Emulator.exe (the window)                 iOS-Emulator.exe --worker (one per
 `state\` with everything it wrote, `snapshots\`, `keymap.json`, `record.json`), `pairing\` (USB pairing records), `network\<id>\`
 (each device's web proxy certificate), `logs\` (`app.log`, `worker-*.log`, `usbmuxd-*.log`,
 `firmwarekit.log`) and `settings.json`. Screenshots go to `Pictures\iOS-Emulator`.
+
+## To be added
+
+* Linux, macOS, Android, modern iOS ports
+* Wayback machine support
+* Deep gaming functionality and controller support
+* Stability fixes for experimental iOS and devices
+* Newer devices
+* Save states
+* Full engine optimization
+* Jailbreaking on experimental devices and iOS, along with jailbreak a device that wasn't jailbroken on setup
+* Upgrading iOS from an older version
+* And more!
 
 ## Credits and license
 
