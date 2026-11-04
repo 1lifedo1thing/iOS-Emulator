@@ -4,6 +4,8 @@
 
 namespace {
 
+const float kNewFingerGap = 0.12f;   // far enough apart for the editor's circles to be grabbed one by one
+
 const char *TypeName(ControlType type) { return type == ControlType::MultiTap ? "multitap" : "tap"; }
 
 bool KeyboardKey(int key) { return key >= ImGuiKey_NamedKey_BEGIN && key < ImGuiKey_GamepadStart; }
@@ -16,23 +18,41 @@ ImGuiKey KeyNamed(const std::string &name) {
     return ImGuiKey_None;
 }
 
+ImVec2 OnScreen(ImVec2 spot) { return ImVec2(std::clamp(spot.x, 0.0f, 1.0f), std::clamp(spot.y, 0.0f, 1.0f)); }
+
 Json LayoutJson(const Layout &layout) {
     Json controls = Json::array();
     for (const Control &control : layout.controls) {
-        Json j = {{"key", control.key == ImGuiKey_None ? "" : ImGui::GetKeyName(control.key)},
-                  {"type", TypeName(control.type)},
-                  {"x", control.x},
-                  {"y", control.y}};
-        if (control.type == ControlType::MultiTap) {
-            j["fingers"] = control.fingers;
-            j["spread"] = control.spread;
-        }
-        controls.push_back(j);
+        Json spots = Json::array();
+        for (const ImVec2 &spot : control.spots)
+            spots.push_back(Json::array({spot.x, spot.y}));
+        controls.push_back(Json{{"key", control.key == ImGuiKey_None ? "" : ImGui::GetKeyName(control.key)},
+                                {"type", TypeName(control.type)},
+                                {"spots", spots}});
     }
     return {{"name", layout.name}, {"controls", controls}};
 }
 
-Layout LayoutFrom(const Json &j) {
+// A control's fingers. Files from before fingers were placed one by one have a centre, a finger
+// count and a gap measured on the device held upright, which becomes that row. Turned, a screen is
+// about 3:2, close enough for a row the editor can straighten.
+std::vector<ImVec2> SpotsFrom(const Json &item, bool multi, bool landscape) {
+    std::vector<ImVec2> spots;
+    if (item.contains("spots")) {
+        for (const Json &spot : item["spots"])
+            spots.push_back(OnScreen(ImVec2(spot.at(0).get<float>(), spot.at(1).get<float>())));
+        return spots;
+    }
+    const int count = multi ? std::clamp(item.value("fingers", kMinFingers), kMinFingers, kMaxFingers) : 1;
+    const float gap = std::clamp(item.value("spread", 0.06f), 0.02f, 0.2f) * (landscape ? 2.0f / 3 : 1.0f);
+    const float row = gap * (count - 1);
+    const float left = std::clamp(item.value("x", 0.5f) - row / 2, 0.0f, 1.0f - row);
+    for (int i = 0; i < count; i++)
+        spots.push_back(OnScreen(ImVec2(left + gap * i, item.value("y", 0.5f))));
+    return spots;
+}
+
+Layout LayoutFrom(const Json &j, bool landscape) {
     Layout layout;
     layout.name = j.value("name", layout.name);
     for (const Json &item : j.value("controls", Json::array())) {
@@ -43,10 +63,10 @@ Layout LayoutFrom(const Json &j) {
         else if (type != TypeName(ControlType::Tap))
             continue;   // a kind this version doesn't know
         control.key = KeyNamed(item.value("key", ""));
-        control.x = std::clamp(item.value("x", control.x), 0.0f, 1.0f);
-        control.y = std::clamp(item.value("y", control.y), 0.0f, 1.0f);
-        control.fingers = std::clamp(item.value("fingers", control.fingers), kMinRowFingers, kMaxRowFingers);
-        control.spread = std::clamp(item.value("spread", control.spread), kMinSpread, kMaxSpread);
+        if (std::vector<ImVec2> spots = SpotsFrom(item, control.type == ControlType::MultiTap, landscape); !spots.empty())
+            control.spots = spots;
+        const int count = int(control.spots.size());
+        SetFingerCount(control, control.type == ControlType::MultiTap ? std::clamp(count, kMinFingers, kMaxFingers) : 1);
         layout.controls.push_back(control);
     }
     return layout;
@@ -60,8 +80,8 @@ Keymap Keymap::Load(const fs::path &file) {
         return keymap;
     try {
         const Json j = Json::parse(LoadFile(file));
-        keymap.portrait = LayoutFrom(j.at("portrait"));
-        keymap.landscape = LayoutFrom(j.at("landscape"));
+        keymap.portrait = LayoutFrom(j.at("portrait"), false);
+        keymap.landscape = LayoutFrom(j.at("landscape"), true);
     } catch (const std::exception &e) {
         Log("Couldn't read %s: %s", PathText(file).c_str(), e.what());
     }
@@ -73,15 +93,30 @@ void Keymap::Save(const fs::path &file) const {
     SaveFile(file, j.dump(2));
 }
 
-std::vector<ImVec2> FingerSpots(const Control &control, ImVec2 screen) {
-    const int count = control.type == ControlType::MultiTap ? control.fingers : 1;
-    const float gap = control.spread * std::min(screen.x, screen.y) / screen.x;
-    const float row = gap * (count - 1);
-    const float left = std::clamp(control.x - row / 2, 0.0f, 1.0f - row);
-    std::vector<ImVec2> spots;
-    for (int i = 0; i < count; i++)
-        spots.push_back(ImVec2(left + gap * i, control.y));
-    return spots;
+void SetFingerCount(Control &control, int count) {
+    if (int(control.spots.size()) > count)
+        control.spots.resize(count);
+    while (int(control.spots.size()) < count) {
+        const ImVec2 last = control.spots.back();
+        const float x = last.x + kNewFingerGap;
+        control.spots.push_back(ImVec2(x > 1 ? x - 1 : x, last.y));   // past the edge, it starts again from the left
+    }
+}
+
+void MoveControl(Control &control, ImVec2 by, int finger) {
+    if (finger >= 0) {
+        ImVec2 &spot = control.spots[finger];
+        spot = OnScreen(ImVec2(spot.x + by.x, spot.y + by.y));
+        return;
+    }
+    ImVec2 low(1, 1), high(0, 0);
+    for (const ImVec2 &spot : control.spots) {
+        low = ImVec2(std::min(low.x, spot.x), std::min(low.y, spot.y));
+        high = ImVec2(std::max(high.x, spot.x), std::max(high.y, spot.y));
+    }
+    by = ImVec2(std::clamp(by.x, -low.x, 1 - high.x), std::clamp(by.y, -low.y, 1 - high.y));
+    for (ImVec2 &spot : control.spots)
+        spot = ImVec2(spot.x + by.x, spot.y + by.y);
 }
 
 bool BindableKey(ImGuiKey key) {

@@ -480,7 +480,7 @@ struct Finger {
     ImVec2 at;
 };
 constexpr int kMouseFinger = 1, kAltFinger = 2, kFirstKeyFinger = 3;
-int KeyFinger(int control, int finger) { return kFirstKeyFinger + control * kMaxRowFingers + finger; }
+int KeyFinger(int control, int finger) { return kFirstKeyFinger + control * kMaxFingers + finger; }
 
 class App {
 public:
@@ -535,8 +535,8 @@ private:
     void DevToolsTab(ImVec2 at, float height);
     ImVec2 ScreenSize(Session &session, bool &turned);
     void DrawScreen(Session &session, ImVec2 origin, ImVec2 size, Orientation orientation);
-    void ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, ImVec2 pixels, Orientation orientation, bool turned);
-    void KeyFingers(Session &session, const Layout &layout, ImVec2 pixels, std::vector<Finger> &fingers);
+    void ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, Orientation orientation, bool turned);
+    void KeyFingers(Session &session, const Layout &layout, std::vector<Finger> &fingers);
     void SendFingers(Session &session, std::vector<Finger> fingers, Orientation orientation, bool turned);
     void WatchHeldInput(Session *shown);
     void ReleaseHeldInput();
@@ -545,7 +545,7 @@ private:
     void Controls(Session &session);
     void KeyboardBadge();
     void ToggleControlsMode();
-    void ControlEditor(const Device &device, Layout &layout, ImVec2 origin, ImVec2 size, ImVec2 pixels);
+    void ControlEditor(const Device &device, Layout &layout, ImVec2 origin, ImVec2 size);
     void ControlPopup(const Device &device, std::vector<Control> &controls);
     void AddControl(const Device &device, ControlType type);
     void SaveKeymap(const Device &device);
@@ -1102,8 +1102,7 @@ ImVec2 App::ScreenSize(Session &session, bool &turned) {
 // touchable.
 void App::DrawScreen(Session &session, ImVec2 screen, ImVec2 screenSize, Orientation orientation) {
     bool turned;
-    const ImVec2 upright = ScreenSize(session, turned);
-    const ImVec2 pixels = orientation == Orientation::Landscape ? ImVec2(upright.y, upright.x) : upright;
+    ScreenSize(session, turned);
     const Texture &texture = textures_[session.GetDevice().id];
     ImDrawList *draw = ImGui::GetWindowDrawList();
     const ImVec2 screenEnd(screen.x + screenSize.x, screen.y + screenSize.y);
@@ -1122,33 +1121,57 @@ void App::DrawScreen(Session &session, ImVec2 screen, ImVec2 screenSize, Orienta
         draw->AddText(ImVec2(screen.x + (screenSize.x - size.x) / 2, screen.y + (screenSize.y - size.y) / 2),
                       IM_COL32(200, 200, 200, 255), text);
     }
-    ScreenTouch(session, screen, screenSize, pixels, orientation, turned);
+    ScreenTouch(session, screen, screenSize, orientation, turned);
 }
 
-// A control's fingers in window pixels, for the screen at `origin`, `size` big and `pixels` wide and tall.
-std::vector<ImVec2> ControlSpots(const Control &control, ImVec2 origin, ImVec2 size, ImVec2 pixels) {
-    std::vector<ImVec2> spots = FingerSpots(control, pixels);
+float ControlRadius() { return ImGui::GetFontSize() * 1.1f; }
+
+// A control's fingers in window pixels, for the screen at `origin`, `size` big.
+std::vector<ImVec2> ControlSpots(const Control &control, ImVec2 origin, ImVec2 size) {
+    std::vector<ImVec2> spots = control.spots;
     for (ImVec2 &spot : spots)
         spot = ImVec2(origin.x + spot.x * size.x, origin.y + spot.y * size.y);
     return spots;
 }
 
-// Draws a control over the screen: a ring for each finger, and its key's name, with the finger
-// count on a row. `opacity` makes it faint while playing and solid in the editor.
-void DrawControl(ImDrawList *draw, const Control &control, const std::vector<ImVec2> &spots, ImVec4 ink, float opacity) {
-    const float radius = ImGui::GetFontSize() * 1.1f;
+// A control's label: its key's name, with the finger count on a multi-finger tap.
+std::string ControlLabel(const Control &control) {
+    std::string label = control.key == ImGuiKey_None ? "?" : ImGui::GetKeyName(control.key);
+    if (control.type == ControlType::MultiTap)
+        label += " x" + std::to_string(control.spots.size());
+    return label;
+}
+
+// The centre of a control's label, in window pixels. A tap's is in its circle. A multi-finger tap's
+// sits above its fingers, clear of them (below them at the top of the screen), because the editor
+// drags them all by it. `top` is the screen's top edge.
+ImVec2 LabelCentre(const Control &control, const std::vector<ImVec2> &spots, float top) {
+    if (control.type == ControlType::Tap)
+        return spots.front();
+    ImVec2 low = spots.front(), high = spots.front();
+    for (const ImVec2 &spot : spots) {
+        low = ImVec2(std::min(low.x, spot.x), std::min(low.y, spot.y));
+        high = ImVec2(std::max(high.x, spot.x), std::max(high.y, spot.y));
+    }
+    const float clear = ControlRadius() + ImGui::GetFontSize() / 2 + 4;
+    const float above = low.y - clear;
+    return ImVec2((low.x + high.x) / 2, above - ImGui::GetFontSize() / 2 >= top ? above : high.y + clear);
+}
+
+// Draws a control over the screen: a ring for each finger, and its label. `opacity` makes it faint
+// while playing and solid in the editor.
+void DrawControl(ImDrawList *draw, const Control &control, const std::vector<ImVec2> &spots, float top, ImVec4 ink,
+                 float opacity) {
     const ImU32 ring = ImGui::GetColorU32(ImVec4(ink.x, ink.y, ink.z, opacity));
     const ImU32 shade = IM_COL32(0, 0, 0, int(120 * opacity));
     for (const ImVec2 &spot : spots) {
-        draw->AddCircleFilled(spot, radius, shade);
-        draw->AddCircle(spot, radius, ring, 0, 2);
+        draw->AddCircleFilled(spot, ControlRadius(), shade);
+        draw->AddCircle(spot, ControlRadius(), ring, 0, 2);
     }
-    std::string label = control.key == ImGuiKey_None ? "?" : ImGui::GetKeyName(control.key);
-    if (control.type == ControlType::MultiTap)
-        label += " x" + std::to_string(control.fingers);
-    const ImVec2 middle((spots.front().x + spots.back().x) / 2, spots.front().y);
+    const std::string label = ControlLabel(control);
+    const ImVec2 centre = LabelCentre(control, spots, top);
     const ImVec2 text = ImGui::CalcTextSize(label.c_str());
-    const ImVec2 at(middle.x - text.x / 2, middle.y - text.y / 2);
+    const ImVec2 at(centre.x - text.x / 2, centre.y - text.y / 2);
     draw->AddRectFilled(ImVec2(at.x - 3, at.y), ImVec2(at.x + text.x + 3, at.y + text.y), shade, 3);
     draw->AddText(at, ImGui::GetColorU32(ImVec4(1, 1, 1, opacity)), label.c_str());
 }
@@ -1157,14 +1180,15 @@ void DrawControl(ImDrawList *draw, const Control &control, const std::vector<ImV
 // press, drag and release on the screen. Hold Alt while dragging for a second, mirrored finger
 // (pinch and rotate), on boards with multi-touch. In Controls mode, the keys bound to controls are
 // fingers too. The editor's circles come first, which gives them the mouse before the screen.
-void App::ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, ImVec2 pixels, Orientation orientation, bool turned) {
+void App::ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, Orientation orientation, bool turned) {
     const Device &device = session.GetDevice();
     Layout &layout = keymaps_[device.id].For(orientation);
     if (editing_) {
-        ControlEditor(device, layout, origin, size, pixels);
+        ControlEditor(device, layout, origin, size);
     } else if (settings_.keyboard == KeyboardMode::Controls && settings_.showControls && !session.sleeping) {
         for (const Control &control : layout.controls)
-            DrawControl(ImGui::GetWindowDrawList(), control, ControlSpots(control, origin, size, pixels), ImVec4(1, 1, 1, 1), 0.4f);
+            DrawControl(ImGui::GetWindowDrawList(), control, ControlSpots(control, origin, size), origin.y,
+                        ImVec4(1, 1, 1, 1), 0.4f);
     }
 
     ImGui::SetCursorScreenPos(origin);
@@ -1189,7 +1213,7 @@ void App::ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, ImVec2 pixel
         if (twoFingers_)
             fingers.push_back({kAltFinger, ImVec2(1 - x, 1 - y)});
     }
-    KeyFingers(session, layout, pixels, fingers);
+    KeyFingers(session, layout, fingers);
     SendFingers(session, fingers, orientation, turned);
 
     if (twoFingers_ && touching_) {   // show where the second finger is
@@ -1200,7 +1224,7 @@ void App::ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, ImVec2 pixel
 
 // Adds the fingers of the keys held down to `fingers`, oldest press first. A key counts from the
 // moment it's pressed in Controls mode: one held through a rotation, say, must be pressed again.
-void App::KeyFingers(Session &session, const Layout &layout, ImVec2 pixels, std::vector<Finger> &fingers) {
+void App::KeyFingers(Session &session, const Layout &layout, std::vector<Finger> &fingers) {
     const ImGuiIO &io = ImGui::GetIO();
     const bool live = settings_.keyboard == KeyboardMode::Controls && !editing_ && !io.WantTextInput &&
                       session.state == "running" && !session.paused && !session.sleeping && !session.Stopping();
@@ -1221,13 +1245,13 @@ void App::KeyFingers(Session &session, const Layout &layout, ImVec2 pixels, std:
 
     if (session.capabilities & QEMU_IOS_CAP_MULTITOUCH) {
         for (int control : heldControls_) {
-            const std::vector<ImVec2> spots = FingerSpots(controls[control], pixels);
+            const std::vector<ImVec2> &spots = controls[control].spots;
             for (int finger = 0; finger < int(spots.size()); finger++)
                 fingers.push_back({KeyFinger(control, finger), spots[finger]});
         }
-    } else if (fingers.empty() && !heldControls_.empty()) {   // one finger only: the key pressed last
+    } else if (fingers.empty() && !heldControls_.empty()) {   // one finger only: the first of the key pressed last
         const int control = heldControls_.back();
-        fingers.push_back({KeyFinger(control, 0), ImVec2(controls[control].x, controls[control].y)});
+        fingers.push_back({KeyFinger(control, 0), controls[control].spots.front()});
     }
 }
 
@@ -1628,7 +1652,7 @@ void App::Controls(Session &session) {
         ImGui::SameLine();
         if (ImGui::Button("Add Multi-finger tap"))
             AddControl(device, ControlType::MultiTap);
-        Tooltip("A key that holds several fingers on the screen, in a row.");
+        Tooltip("A key that holds several fingers on the screen. Drag each one where you want it.");
         return;
     }
 
@@ -1676,8 +1700,8 @@ void App::KeyboardBadge() {
         ToggleControlsMode();
     ImGui::SameLine();
     if (IconButton(icon::kEdit, "Edit controls",
-                   "Edit controls: keys that hold fingers on the screen. Drag a control to move it, and right-click "
-                   "it to change it.",
+                   "Edit controls: keys that hold fingers on the screen. Drag a finger to place it, drag a "
+                   "multi-finger tap's label to move all its fingers, and right-click to change a control.",
                    editing_))
         editing_ = !editing_;
 }
@@ -1689,30 +1713,26 @@ void App::ToggleControlsMode() {
     settings_.Save();
 }
 
-// The editor, over the screen: drag a control to move it, right-click it for its popup. The device
-// gets no touches from the controls meanwhile; the mouse still works on the rest of the screen.
-void App::ControlEditor(const Device &device, Layout &layout, ImVec2 origin, ImVec2 size, ImVec2 pixels) {
+// The editor, over the screen: drag a finger to place it, drag a multi-finger tap's label to move
+// all its fingers, and right-click either for the control's popup. The device gets no touches from
+// the controls meanwhile; the mouse still works on the rest of the screen.
+void App::ControlEditor(const Device &device, Layout &layout, ImVec2 origin, ImVec2 size) {
     const ImGuiIO &io = ImGui::GetIO();
     ImDrawList *draw = ImGui::GetWindowDrawList();
-    const float side = ImGui::GetFontSize() * 2.2f;
+    const float side = ControlRadius() * 2;
     std::vector<Control> &controls = layout.controls;
     for (int index = 0; index < int(controls.size()); index++) {
         Control &control = controls[index];
-        const std::vector<ImVec2> spots = ControlSpots(control, origin, size, pixels);
+        const std::vector<ImVec2> spots = ControlSpots(control, origin, size);
         bool hot = false;
-        ImGui::PushID(index);
-        for (int finger = 0; finger < int(spots.size()); finger++) {
+        // A part that can be grabbed, `extent` big around `centre`: one finger, or -1 for all of them.
+        auto grip = [&](int finger, ImVec2 centre, ImVec2 extent) {
             ImGui::PushID(finger);
-            ImGui::SetCursorScreenPos(ImVec2(spots[finger].x - side / 2, spots[finger].y - side / 2));
-            ImGui::InvisibleButton("finger", ImVec2(side, side));
+            ImGui::SetCursorScreenPos(ImVec2(centre.x - extent.x / 2, centre.y - extent.y / 2));
+            ImGui::InvisibleButton("grip", extent);
             hot |= ImGui::IsItemHovered() || ImGui::IsItemActive();
-            if (ImGui::IsItemActive() && (io.MouseDelta.x != 0 || io.MouseDelta.y != 0)) {
-                control.x = std::clamp(control.x + io.MouseDelta.x / size.x, 0.0f, 1.0f);
-                control.y = std::clamp(control.y + io.MouseDelta.y / size.y, 0.0f, 1.0f);
-                // A row stops at the edges, and its centre with it, so it comes straight back.
-                const std::vector<ImVec2> row = FingerSpots(control, pixels);
-                control.x = (row.front().x + row.back().x) / 2;
-            }
+            if (ImGui::IsItemActive() && (io.MouseDelta.x != 0 || io.MouseDelta.y != 0))
+                MoveControl(control, ImVec2(io.MouseDelta.x / size.x, io.MouseDelta.y / size.y), finger);
             if (ImGui::IsItemDeactivated())
                 SaveKeymap(device);
             if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
@@ -1721,9 +1741,16 @@ void App::ControlEditor(const Device &device, Layout &layout, ImVec2 origin, ImV
                 openPopup_ = true;
             }
             ImGui::PopID();
+        };
+        ImGui::PushID(index);
+        for (int finger = 0; finger < int(spots.size()); finger++)
+            grip(finger, spots[finger], ImVec2(side, side));
+        if (control.type == ControlType::MultiTap) {
+            const ImVec2 text = ImGui::CalcTextSize(ControlLabel(control).c_str());
+            grip(-1, LabelCentre(control, spots, origin.y), ImVec2(text.x + 12, text.y + 4));
         }
         ImGui::PopID();
-        DrawControl(draw, control, spots, hot ? kAccent : ImVec4(1, 1, 1, 1), 1);
+        DrawControl(draw, control, spots, origin.y, hot ? kAccent : ImVec4(1, 1, 1, 1), 1);
     }
 
     if (openPopup_)
@@ -1784,12 +1811,10 @@ void App::ControlPopup(const Device &device, std::vector<Control> &controls) {
     if (taken && control.key != ImGuiKey_None)
         ImGui::TextColored(kWarn, "Another control here uses this key.");
     if (control.type == ControlType::MultiTap) {
+        int fingers = int(control.spots.size());
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
-        ImGui::SliderInt("Fingers", &control.fingers, kMinRowFingers, kMaxRowFingers);
-        if (ImGui::IsItemDeactivatedAfterEdit())
-            SaveKeymap(device);
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
-        ImGui::SliderFloat("Spread", &control.spread, kMinSpread, kMaxSpread, "%.2f");
+        if (ImGui::SliderInt("Fingers", &fingers, kMinFingers, kMaxFingers))
+            SetFingerCount(control, fingers);
         if (ImGui::IsItemDeactivatedAfterEdit())
             SaveKeymap(device);
     }
@@ -1806,6 +1831,10 @@ void App::AddControl(const Device &device, ControlType type) {
     std::vector<Control> &controls = keymaps_[device.id].For(OrientationOf(device)).controls;
     Control control;
     control.type = type;
+    if (type == ControlType::MultiTap) {
+        SetFingerCount(control, kMinFingers);
+        MoveControl(control, ImVec2(-0.06f, 0), -1);   // centred on the screen
+    }
     controls.push_back(control);
     chosenControl_ = int(controls.size()) - 1;
     askingKey_ = true;

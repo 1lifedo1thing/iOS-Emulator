@@ -77,8 +77,9 @@ there too.
 | In the editor (**Edit controls** under the device) | Does |
 | --- | --- |
 | **Add Tap** / **Add Multi-finger tap** | Places a control at the centre, then asks for its key |
-| Drag a circle | Moves the control |
-| Right-click a circle | Change its key, delete it, and set a multi-finger tap's fingers and spread |
+| Drag a circle | Places that finger |
+| Drag a multi-finger tap's label | Moves all its fingers together |
+| Right-click a circle or label | Change its key, delete it, and set a multi-finger tap's number of fingers |
 
 Portrait and landscape have separate layouts, each device has its own, and the mouse still works on
 the rest of the screen while you edit. Outside the editor, faint labels show the controls (**Show
@@ -184,7 +185,7 @@ iOS-Emulator.exe (the window)                 iOS-Emulator.exe --worker (one per
 | --- | --- |
 | `src/main.cpp` | Entry point and the command-line modes |
 | `src/ui.cpp` | The window: device list, the device and its toolbar, fullscreen, Add Device (grid and version wheel), developer panel, settings |
-| `src/keymap.cpp` | Keys that hold fingers on the screen: the layouts, `keymap.json`, where a control's fingers land |
+| `src/keymap.cpp` | Keys that hold fingers on the screen: the layouts, `keymap.json`, moving a control's fingers |
 | `src/skin.cpp` | The pictured devices: draws `resources\skins\*.svg` (with nanosvg), turned for landscape, with working buttons |
 | `src/session.cpp` | A running device as the window sees it: starts the helpers, reads frames and events |
 | `src/worker.cpp` | The worker process: runs the engine, sound, commands, typing (through `it_typein`) |
