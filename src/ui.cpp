@@ -544,6 +544,7 @@ private:
     void FullscreenControls(Session &session);
     void Controls(Session &session);
     void KeyboardBadge();
+    void ToggleControlsMode();
     void ControlEditor(const Device &device, Layout &layout, ImVec2 origin, ImVec2 size, ImVec2 pixels);
     void ControlPopup(const Device &device, std::vector<Control> &controls);
     void AddControl(const Device &device, ControlType type);
@@ -736,11 +737,8 @@ void App::Frame() {
         editing_ = false;   // its buttons are under the device
 
     // F2 turns Controls mode on and off while a device is on screen.
-    if (shown && ImGui::IsKeyPressed(ImGuiKey_F2, false) && !ImGui::GetIO().WantTextInput && !editorPopup_) {
-        const bool on = settings_.keyboard == KeyboardMode::Controls;
-        settings_.SetKeyboard(on ? settings_.beforeControls : KeyboardMode::Controls);
-        settings_.Save();
-    }
+    if (shown && ImGui::IsKeyPressed(ImGuiKey_F2, false) && !ImGui::GetIO().WantTextInput && !editorPopup_)
+        ToggleControlsMode();
     WatchHeldInput(shown);
 
     if (fullscreen_) {
@@ -1658,27 +1656,37 @@ void App::Controls(Session &session) {
     }
 }
 
-// The keyboard's mode, and Edit controls. In Controls mode the badge opens the editor too.
+// The keyboard's mode, and Edit controls. The badge turns Controls mode on and off, as F2 does.
 void App::KeyboardBadge() {
     const bool controls = settings_.keyboard == KeyboardMode::Controls;
     if (controls) {
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.19f, 0.33f, 0.56f, 1));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.40f, 0.66f, 1));
     }
-    bool toggle = ImGui::Button(kKeyboardModes[int(settings_.keyboard)]) && controls;
+    const bool clicked = ImGui::Button(kKeyboardModes[int(settings_.keyboard)]);
     if (controls)
         ImGui::PopStyleColor(2);
-    Tooltip(controls ? "The keyboard holds fingers on the screen, and shortcuts take Ctrl. F2 goes back. Click to edit "
-                       "the controls."
-                     : "What the keyboard does. F2 switches to Controls, where keys hold fingers on the screen. The "
-                       "other modes are in Settings.");
+    const std::string tip =
+        controls ? std::string("Keys hold fingers on the screen, and shortcuts take Ctrl. Click or press F2 to go back to ") +
+                       kKeyboardModes[int(settings_.beforeControls)] + "."
+                 : std::string("Click or press F2 for Controls, where keys hold fingers on the screen. Shortcuts and "
+                               "Typing are chosen in Settings.");
+    Tooltip(tip.c_str());
+    if (clicked)
+        ToggleControlsMode();
     ImGui::SameLine();
-    toggle |= IconButton(icon::kEdit, "Edit controls",
-                         "Edit controls: keys that hold fingers on the screen. Drag a control to move it, and "
-                         "right-click it to change it.",
-                         editing_);
-    if (toggle)
+    if (IconButton(icon::kEdit, "Edit controls",
+                   "Edit controls: keys that hold fingers on the screen. Drag a control to move it, and right-click "
+                   "it to change it.",
+                   editing_))
         editing_ = !editing_;
+}
+
+// Into Controls mode, or back to the mode it came from.
+void App::ToggleControlsMode() {
+    const bool on = settings_.keyboard == KeyboardMode::Controls;
+    settings_.SetKeyboard(on ? settings_.beforeControls : KeyboardMode::Controls);
+    settings_.Save();
 }
 
 // The editor, over the screen: drag a control to move it, right-click it for its popup. The device

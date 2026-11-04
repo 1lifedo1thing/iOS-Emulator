@@ -48,11 +48,11 @@ The program finds the `resources` folder next to it or in a parent folder, so it
    | R, or the Rotate button | Portrait or landscape: the device turns, and apps that support landscape turn with it |
    | Arrow keys | Tilt the device (for games steered by tilting) |
    | The box under the device | Types text into iOS |
-   | F2 | Controls mode on or off: keys hold fingers on the screen |
+   | F2, or the mode button | Controls mode on or off: keys hold fingers on the screen |
    | F11 | Fullscreen (F11 or Esc leaves it) |
 
    The toolbar under the device has Rotate, Pause, Screenshot, Fullscreen, Sound, Internet, Web proxy and
-   Stop; hover a button to see what it does. The row under it shows the keyboard's mode and has **Edit
+   Stop; hover a button to see what it does. The row under it has the keyboard's mode button and **Edit
    controls**.
 3. **Stop** shuts iOS down cleanly, like sliding to power off. Each device keeps its own storage; the
    prepared system is never changed, and **Erase** brings a device back to it.
@@ -70,10 +70,11 @@ Devices prepared before typing used `it_typein` don't have it: prepare them agai
 
 **Controls** turn keys into fingers, for games: holding a bound key presses a finger at its spot on
 the screen, releasing it lifts the finger, and holding several keys gives several fingers (up to 5
-at once, the touch panel's limit, counting the mouse). F2 turns **Controls** mode on and off (or choose it in
-Settings), and the shortcuts take Ctrl there too.
+at once, the touch panel's limit, counting the mouse). F2 or a click on the mode button under the device
+turns **Controls** mode on and off (you can also choose it in Settings), and the shortcuts take Ctrl
+there too.
 
-| In the editor (**Edit controls** under the device, or click the Controls badge) | Does |
+| In the editor (**Edit controls** under the device) | Does |
 | --- | --- |
 | **Add Tap** / **Add Multi-finger tap** | Places a control at the centre, then asks for its key |
 | Drag a circle | Moves the control |
