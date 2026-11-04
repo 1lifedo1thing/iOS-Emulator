@@ -56,16 +56,23 @@ Devices prepared before typing used `it_typein` don't have it: prepare them agai
 
 **Controls** turn keys into fingers, for games: holding a bound key presses a finger at its spot on
 the screen, releasing it lifts the finger, and holding several keys gives several fingers (up to 5
-at once, the touch panel's limit, counting the mouse). F2 or a click on the mode button under the device
-turns **Controls** mode on and off (you can also choose it in Settings), and the shortcuts take Ctrl
-there too.
+at once, the touch panel's limit, counting the mouse). A joystick is four keys that steer one finger
+around a ring, as on a game's on-screen stick: the finger lands at the centre when any of them goes
+down, slides out in the direction held (two keys give a diagonal, opposite keys return it to the
+centre), and lifts when all four are up. F2 or a click on the mode button under the device turns
+**Controls** mode on and off (you can also choose it in Settings), and the shortcuts take Ctrl there
+too.
 
 | In the editor (**Edit controls** under the device) | Does |
 | --- | --- |
 | **Add Tap** / **Add Multi-finger tap** | Places a control at the centre, then asks for its key |
+| **Add Joystick** | Places a joystick at the centre on W, A, S and D, taking those keys from other controls, which then show `?` |
 | Drag a circle | Places that finger |
 | Drag a multi-finger tap's label | Moves all its fingers together |
-| Right-click a circle or label | Change its key, delete it, and set a multi-finger tap's number of fingers |
+| Drag a joystick's centre / rim | Moves it / resizes it |
+| Right-click a circle, label, or a joystick's centre or rim | Change its keys, delete it, and set a multi-finger tap's number of fingers |
+
+A key belongs to one control per layout: the editor turns down a key that's already taken.
 
 Portrait and landscape have separate layouts, each device has its own, and the mouse still works on
 the rest of the screen while you edit. Outside the editor, faint labels show the controls (**Show

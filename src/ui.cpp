@@ -484,6 +484,16 @@ constexpr float kSwipeGap = 0.08f;   // between them, as a share of the screen's
 constexpr int kMouseFinger = 1, kAltFinger = 2, kSwipeFinger = 3, kFirstKeyFinger = kSwipeFinger + kSwipeRow - 1;
 int KeyFinger(int control, int finger) { return kFirstKeyFinger + control * kMaxFingers + finger; }
 
+// A control with keys held. `keys` has bit i set for its key i, from the moment that key is pressed
+// in Controls mode until it comes up, so a key that was already down doesn't count, even on a joystick
+// that another key is holding.
+struct HeldControl {
+    int control;
+    unsigned keys;
+    ImVec2 at;             // where its first finger is, as shown; only a joystick's moves
+    bool landed = false;   // that finger has had its first frame down
+};
+
 class App {
 public:
     App() {
@@ -520,6 +530,12 @@ public:
             orientations_[device->id] = Orientation::Landscape;
     }
     void ShowDevTools(bool show) { settings_.devTools = show; }   // for tests: not saved
+    void ShowEditor() {                                // for tests: as open on the selected device
+        if (Device *device = Selected()) {
+            editing_ = true;
+            heldDevice_ = device->id;
+        }
+    }
 
 private:
     enum class Page { Device, AddDevice, Settings };
@@ -539,7 +555,7 @@ private:
     ImVec2 ScreenSize(Session &session, bool &turned);
     void DrawScreen(Session &session, ImVec2 origin, ImVec2 size, Orientation orientation);
     void ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, Orientation orientation, bool turned);
-    void KeyFingers(Session &session, const Layout &layout, std::vector<Finger> &fingers);
+    void KeyFingers(Session &session, const Layout &layout, float aspect, std::vector<Finger> &fingers);
     void SendFingers(Session &session, std::vector<Finger> fingers, Orientation orientation, bool turned);
     void WatchHeldInput(Session *shown);
     void ReleaseHeldInput();
@@ -589,7 +605,7 @@ private:
     // Input state for the device on screen.
     bool touching_ = false, twoFingers_ = false, swipeRow_ = false;
     std::map<int, ImVec2> fingers_;                      // what iOS has down: finger id -> panel position
-    std::vector<int> heldControls_;                      // the controls whose keys are held, oldest press first
+    std::vector<HeldControl> heldControls_;              // oldest press first
     std::set<int> heldButtons_;                          // held from the keyboard
     std::set<int> ignoredButtons_;                       // released for the user: their keys must come up first
     Motion motion_;
@@ -608,7 +624,11 @@ private:
     bool editorPopup_ = false;                           // its popup is open, so keys don't reach iOS
     bool openPopup_ = false;                             // open it on the next frame
     bool askingKey_ = false;                             // it's waiting for a key
+    int keySlot_ = 0;                                    // ...for this one of the control's keys (Control::Key)
+    std::string keyRefusal_;                             // why it turned down the last key pressed
+    bool newControl_ = false;                            // just added, and goes again if it gets no key
     int chosenControl_ = -1;                             // the control it's for
+    int resizingControl_ = -1;                           // the joystick whose rim is being dragged
 
     // Fullscreen: only the selected device's screen, with controls that show while the mouse moves.
     bool fullscreen_ = false;
@@ -1141,9 +1161,11 @@ std::vector<ImVec2> ControlSpots(const Control &control, ImVec2 origin, ImVec2 s
     return spots;
 }
 
+std::string KeyLabel(ImGuiKey key) { return key == ImGuiKey_None ? "?" : ImGui::GetKeyName(key); }
+
 // A control's label: its key's name, with the finger count on a multi-finger tap.
 std::string ControlLabel(const Control &control) {
-    std::string label = control.key == ImGuiKey_None ? "?" : ImGui::GetKeyName(control.key);
+    std::string label = KeyLabel(control.key);
     if (control.type == ControlType::MultiTap)
         label += " x" + std::to_string(control.spots.size());
     return label;
@@ -1165,22 +1187,42 @@ ImVec2 LabelCentre(const Control &control, const std::vector<ImVec2> &spots, flo
     return ImVec2((low.x + high.x) / 2, above - ImGui::GetFontSize() / 2 >= top ? above : high.y + clear);
 }
 
-// Draws a control over the screen: a ring for each finger, and its label. `opacity` makes it faint
-// while playing and solid in the editor.
-void DrawControl(ImDrawList *draw, const Control &control, const std::vector<ImVec2> &spots, float top, ImVec4 ink,
-                 float opacity) {
-    const ImU32 ring = ImGui::GetColorU32(ImVec4(ink.x, ink.y, ink.z, opacity));
-    const ImU32 shade = IM_COL32(0, 0, 0, int(120 * opacity));
-    for (const ImVec2 &spot : spots) {
-        draw->AddCircleFilled(spot, ControlRadius(), shade);
-        draw->AddCircle(spot, ControlRadius(), ring, 0, 2);
-    }
-    const std::string label = ControlLabel(control);
-    const ImVec2 centre = LabelCentre(control, spots, top);
+// A label centred on `centre`, over a dark patch that keeps it readable on any screen.
+void DrawLabel(ImDrawList *draw, const std::string &label, ImVec2 centre, ImU32 shade, float opacity) {
     const ImVec2 text = ImGui::CalcTextSize(label.c_str());
     const ImVec2 at(centre.x - text.x / 2, centre.y - text.y / 2);
     draw->AddRectFilled(ImVec2(at.x - 3, at.y), ImVec2(at.x + text.x + 3, at.y + text.y), shade, 3);
     draw->AddText(at, ImGui::GetColorU32(ImVec4(1, 1, 1, opacity)), label.c_str());
+}
+
+// Draws a control over the screen. `opacity` makes it faint while playing and solid in the editor.
+// A tap is a ring for each finger and its label. A joystick is a ring of its radius (`width` is the
+// screen's, in pixels), a dot for its finger at `dot`, and each direction's key outside the ring on
+// that side.
+void DrawControl(ImDrawList *draw, const Control &control, const std::vector<ImVec2> &spots, float top, float width,
+                 ImVec2 dot, ImVec4 ink, float opacity) {
+    const ImU32 ring = ImGui::GetColorU32(ImVec4(ink.x, ink.y, ink.z, opacity));
+    const ImU32 shade = IM_COL32(0, 0, 0, int(120 * opacity));
+    if (control.type == ControlType::Joystick) {
+        const ImVec2 centre = spots.front();
+        const float radius = control.radius * width;
+        draw->AddCircleFilled(centre, radius, shade);
+        draw->AddCircle(centre, radius, ring, 0, 2);
+        draw->AddCircleFilled(dot, ControlRadius() / 2, ring);
+        const ImVec2 sides[kJoystickKeys] = {ImVec2(0, -1), ImVec2(-1, 0), ImVec2(0, 1), ImVec2(1, 0)};   // as kDirections
+        for (int i = 0; i < kJoystickKeys; i++) {
+            const std::string label = KeyLabel(control.directions[i]);
+            const ImVec2 text = ImGui::CalcTextSize(label.c_str());
+            const float clear = radius + (sides[i].x != 0 ? text.x : text.y) / 2 + 5;
+            DrawLabel(draw, label, ImVec2(centre.x + sides[i].x * clear, centre.y + sides[i].y * clear), shade, opacity);
+        }
+        return;
+    }
+    for (const ImVec2 &spot : spots) {
+        draw->AddCircleFilled(spot, ControlRadius(), shade);
+        draw->AddCircle(spot, ControlRadius(), ring, 0, 2);
+    }
+    DrawLabel(draw, ControlLabel(control), LabelCentre(control, spots, top), shade, opacity);
 }
 
 // Everything that touches the screen, gathered into one list each frame. The mouse is a finger:
@@ -1195,9 +1237,15 @@ void App::ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, Orientation 
     if (editing_) {
         ControlEditor(device, layout, origin, size);
     } else if (settings_.keyboard == KeyboardMode::Controls && settings_.showControls && !session.sleeping) {
-        for (const Control &control : layout.controls)
-            DrawControl(ImGui::GetWindowDrawList(), control, ControlSpots(control, origin, size), origin.y,
-                        ImVec4(1, 1, 1, 1), 0.4f);
+        for (int index = 0; index < int(layout.controls.size()); index++) {
+            const Control &control = layout.controls[index];
+            const std::vector<ImVec2> spots = ControlSpots(control, origin, size);
+            ImVec2 dot = spots.front();
+            for (const HeldControl &held : heldControls_)
+                if (held.control == index)
+                    dot = ImVec2(origin.x + held.at.x * size.x, origin.y + held.at.y * size.y);
+            DrawControl(ImGui::GetWindowDrawList(), control, spots, origin.y, size.x, dot, ImVec4(1, 1, 1, 1), 0.4f);
+        }
     }
 
     ImGui::SetCursorScreenPos(origin);
@@ -1237,13 +1285,15 @@ void App::ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, Orientation 
         if (twoFingers_)
             awayFromCursor(kAltFinger, ImVec2(1 - x, 1 - y));
     }
-    KeyFingers(session, layout, fingers);
+    KeyFingers(session, layout, size.x / size.y, fingers);
     SendFingers(session, fingers, orientation, turned);
 }
 
 // Adds the fingers of the keys held down to `fingers`, oldest press first. A key counts from the
-// moment it's pressed in Controls mode: one held through a rotation, say, must be pressed again.
-void App::KeyFingers(Session &session, const Layout &layout, std::vector<Finger> &fingers) {
+// moment it's pressed in Controls mode: one held through a rotation, say, must be pressed again. A
+// joystick's finger lands at the centre and steers from the next frame on. `aspect` is the screen's
+// width over its height.
+void App::KeyFingers(Session &session, const Layout &layout, float aspect, std::vector<Finger> &fingers) {
     const ImGuiIO &io = ImGui::GetIO();
     const bool live = settings_.keyboard == KeyboardMode::Controls && !editing_ && !io.WantTextInput &&
                       session.state == "running" && !session.paused && !session.sleeping && !session.Stopping();
@@ -1252,25 +1302,45 @@ void App::KeyFingers(Session &session, const Layout &layout, std::vector<Finger>
         return;
     }
     const std::vector<Control> &controls = layout.controls;
+    for (HeldControl &held : heldControls_) {
+        const Control &control = controls[held.control];
+        for (int k = 0; k < control.KeyCount(); k++)
+            if ((held.keys >> k & 1) && !ImGui::IsKeyDown(control.Key(k)))
+                held.keys &= ~(1u << k);
+    }
     heldControls_.erase(std::remove_if(heldControls_.begin(), heldControls_.end(),
-                                       [&](int control) { return !ImGui::IsKeyDown(controls[control].key); }),
+                                       [](const HeldControl &held) { return held.keys == 0; }),
                         heldControls_.end());
-    for (int control = 0; control < int(controls.size()); control++) {
-        const ImGuiKey key = controls[control].key;
-        const bool ctrl = key == ImGuiKey_LeftCtrl || key == ImGuiKey_RightCtrl;
-        if (key != ImGuiKey_None && ImGui::IsKeyPressed(key, false) && (ctrl || !io.KeyCtrl))   // Ctrl+key is a shortcut
-            heldControls_.push_back(control);
+    for (int index = 0; index < int(controls.size()); index++) {
+        const Control &control = controls[index];
+        for (int k = 0; k < control.KeyCount(); k++) {
+            const ImGuiKey key = control.Key(k);
+            const bool ctrl = key == ImGuiKey_LeftCtrl || key == ImGuiKey_RightCtrl;
+            if (key == ImGuiKey_None || !ImGui::IsKeyPressed(key, false) || (io.KeyCtrl && !ctrl))   // Ctrl+key is a shortcut
+                continue;
+            auto held = std::find_if(heldControls_.begin(), heldControls_.end(),
+                                     [&](const HeldControl &h) { return h.control == index; });
+            if (held == heldControls_.end())
+                held = heldControls_.insert(held, {index, 0, control.spots.front()});
+            held->keys |= 1u << k;
+        }
+    }
+    for (HeldControl &held : heldControls_) {
+        if (held.landed && controls[held.control].type == ControlType::Joystick)
+            held.at = JoystickStep(controls[held.control], held.keys, held.at, aspect);
+        held.landed = true;
     }
 
     if (session.capabilities & QEMU_IOS_CAP_MULTITOUCH) {
-        for (int control : heldControls_) {
-            const std::vector<ImVec2> &spots = controls[control].spots;
-            for (int finger = 0; finger < int(spots.size()); finger++)
-                fingers.push_back({KeyFinger(control, finger), spots[finger]});
+        for (const HeldControl &held : heldControls_) {
+            const std::vector<ImVec2> &spots = controls[held.control].spots;
+            fingers.push_back({KeyFinger(held.control, 0), held.at});
+            for (int finger = 1; finger < int(spots.size()); finger++)
+                fingers.push_back({KeyFinger(held.control, finger), spots[finger]});
         }
     } else if (fingers.empty() && !heldControls_.empty()) {   // one finger only: the first of the key pressed last
-        const int control = heldControls_.back();
-        fingers.push_back({KeyFinger(control, 0), controls[control].spots.front()});
+        const HeldControl &held = heldControls_.back();
+        fingers.push_back({KeyFinger(held.control, 0), held.at});
     }
 }
 
@@ -1319,8 +1389,10 @@ void App::WatchHeldInput(Session *shown) {
     const Orientation orientation = shown ? OrientationOf(shown->GetDevice()) : Orientation::Portrait;
     if (device != heldDevice_)
         editing_ = false;
-    if (!editing_)
+    if (!editing_) {
         editorPopup_ = false;
+        resizingControl_ = -1;
+    }
     if (device != heldDevice_ || settings_.keyboard != heldMode_ || orientation != heldOrientation_ ||
         editing_ != heldEditing_ || ImGui::GetIO().AppFocusLost || (shown && shown->Stopping()))
         ReleaseHeldInput();
@@ -1672,6 +1744,11 @@ void App::Controls(Session &session) {
         if (ImGui::Button("Add Multi-finger tap"))
             AddControl(device, ControlType::MultiTap);
         Tooltip("A key that holds several fingers on the screen. Drag each one where you want it.");
+        ImGui::SameLine();
+        if (ImGui::Button("Add Joystick"))
+            AddControl(device, ControlType::Joystick);
+        Tooltip("Four keys that steer one finger around a ring. It starts on W, A, S and D, taking them from any "
+                "other control here.");
         return;
     }
 
@@ -1720,7 +1797,8 @@ void App::KeyboardBadge() {
     ImGui::SameLine();
     if (IconButton(icon::kEdit, "Edit controls",
                    "Edit controls: keys that hold fingers on the screen. Drag a finger to place it, drag a "
-                   "multi-finger tap's label to move all its fingers, and right-click to change a control.",
+                   "multi-finger tap's label to move all its fingers, drag a joystick's rim to resize it, and "
+                   "right-click to change a control.",
                    editing_))
         editing_ = !editing_;
 }
@@ -1733,27 +1811,41 @@ void App::ToggleControlsMode() {
 }
 
 // The editor, over the screen: drag a finger to place it, drag a multi-finger tap's label to move
-// all its fingers, and right-click either for the control's popup. The device gets no touches from
-// the controls meanwhile; the mouse still works on the rest of the screen.
+// all its fingers, drag a joystick's centre to move it and its rim to resize it, and right-click any
+// of them for the control's popup. The device gets no touches from the controls meanwhile; the mouse
+// still works on the rest of the screen.
 void App::ControlEditor(const Device &device, Layout &layout, ImVec2 origin, ImVec2 size) {
     const ImGuiIO &io = ImGui::GetIO();
     ImDrawList *draw = ImGui::GetWindowDrawList();
     const float side = ControlRadius() * 2;
+    constexpr int kRimGrip = -2;
     std::vector<Control> &controls = layout.controls;
     for (int index = 0; index < int(controls.size()); index++) {
         Control &control = controls[index];
         const std::vector<ImVec2> spots = ControlSpots(control, origin, size);
+        const bool joystick = control.type == ControlType::Joystick;
+        const float radius = control.radius * size.x;
+        const float fromCentre = std::hypot(io.MousePos.x - spots.front().x, io.MousePos.y - spots.front().y);
         bool hot = false;
-        // A part that can be grabbed, `extent` big around `centre`: one finger, or -1 for all of them.
+        // A part that can be grabbed, `extent` big around `centre`: one finger, -1 for all of them, or
+        // a joystick's rim.
         auto grip = [&](int finger, ImVec2 centre, ImVec2 extent) {
             ImGui::PushID(finger);
             ImGui::SetCursorScreenPos(ImVec2(centre.x - extent.x / 2, centre.y - extent.y / 2));
             ImGui::InvisibleButton("grip", extent);
             hot |= ImGui::IsItemHovered() || ImGui::IsItemActive();
-            if (ImGui::IsItemActive() && (io.MouseDelta.x != 0 || io.MouseDelta.y != 0))
-                MoveControl(control, ImVec2(io.MouseDelta.x / size.x, io.MouseDelta.y / size.y), finger);
-            if (ImGui::IsItemDeactivated())
+            if (ImGui::IsItemActivated() && finger == kRimGrip)
+                resizingControl_ = index;
+            if (ImGui::IsItemActive() && (io.MouseDelta.x != 0 || io.MouseDelta.y != 0)) {
+                if (finger == kRimGrip)
+                    control.radius = std::clamp(fromCentre / size.x, kMinJoystickRadius, kMaxJoystickRadius);
+                else
+                    MoveControl(control, ImVec2(io.MouseDelta.x / size.x, io.MouseDelta.y / size.y), finger);
+            }
+            if (ImGui::IsItemDeactivated()) {
+                resizingControl_ = -1;
                 SaveKeymap(device);
+            }
             if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
                 chosenControl_ = index;
                 askingKey_ = false;
@@ -1762,14 +1854,21 @@ void App::ControlEditor(const Device &device, Layout &layout, ImVec2 origin, ImV
             ImGui::PopID();
         };
         ImGui::PushID(index);
+        // A joystick's centre stays smaller than the ring, which leaves the rim free to grab.
+        const float fingerSide = joystick ? std::min(side, radius) : side;
         for (int finger = 0; finger < int(spots.size()); finger++)
-            grip(finger, spots[finger], ImVec2(side, side));
+            grip(finger, spots[finger], ImVec2(fingerSide, fingerSide));
         if (control.type == ControlType::MultiTap) {
             const ImVec2 text = ImGui::CalcTextSize(ControlLabel(control).c_str());
             grip(-1, LabelCentre(control, spots, origin.y), ImVec2(text.x + 12, text.y + 4));
         }
+        // The rim's grip follows the mouse along the ring: a square around all of it would also take
+        // the clicks meant for the screen, in its corners and inside the ring.
+        const float reach = ControlRadius() / 2;
+        if (joystick && (resizingControl_ == index || std::abs(fromCentre - radius) <= reach))
+            grip(kRimGrip, io.MousePos, ImVec2(reach * 2, reach * 2));
         ImGui::PopID();
-        DrawControl(draw, control, spots, origin.y, hot ? kAccent : ImVec4(1, 1, 1, 1), 1);
+        DrawControl(draw, control, spots, origin.y, size.x, spots.front(), hot ? kAccent : ImVec4(1, 1, 1, 1), 1);
     }
 
     if (openPopup_)
@@ -1781,15 +1880,16 @@ void App::ControlEditor(const Device &device, Layout &layout, ImVec2 origin, ImV
     }
     editorPopup_ = ImGui::IsPopupOpen("control");
     if (!editorPopup_) {
-        const bool chosen = chosenControl_ >= 0 && chosenControl_ < int(controls.size());
-        if (chosen && askingKey_ && controls[chosenControl_].key == ImGuiKey_None)
-            controls.erase(controls.begin() + chosenControl_);   // just added, and no key was given
+        if (newControl_ && chosenControl_ >= 0 && chosenControl_ < int(controls.size()))
+            controls.erase(controls.begin() + chosenControl_);   // no key was given
         chosenControl_ = -1;
-        askingKey_ = false;
+        askingKey_ = newControl_ = false;
+        keyRefusal_.clear();
     }
 }
 
-// The popup of the chosen control: its key, its fingers and Delete.
+// The popup of the chosen control: its keys, its fingers and Delete. A key that another control holds
+// is turned down, and it keeps waiting for one that's free.
 void App::ControlPopup(const Device &device, std::vector<Control> &controls) {
     if (chosenControl_ < 0 || chosenControl_ >= int(controls.size())) {
         ImGui::CloseCurrentPopup();
@@ -1797,38 +1897,52 @@ void App::ControlPopup(const Device &device, std::vector<Control> &controls) {
     }
     Control &control = controls[chosenControl_];
 
+    const bool joystick = control.type == ControlType::Joystick;
     if (askingKey_) {
-        ImGui::TextUnformatted("Press a key...");
+        ImGui::Text("Press a key%s%s...", joystick ? " for " : "", joystick ? kDirections[keySlot_] : "");
+        if (!keyRefusal_.empty())
+            ImGui::TextColored(kWarn, "%s", keyRefusal_.c_str());
         DimText("Esc cancels");
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-            if (control.key == ImGuiKey_None)
+            keyRefusal_.clear();
+            if (newControl_)
                 ImGui::CloseCurrentPopup();   // ControlEditor removes it
             else
                 askingKey_ = false;
             return;
         }
-        for (int key = ImGuiKey_NamedKey_BEGIN; key < ImGuiKey_NamedKey_END; key++)
-            if (BindableKey(ImGuiKey(key)) && ImGui::IsKeyPressed(ImGuiKey(key), false)) {
-                control.key = ImGuiKey(key);
-                askingKey_ = false;
+        for (int key = ImGuiKey_NamedKey_BEGIN; key < ImGuiKey_NamedKey_END; key++) {
+            if (!BindableKey(ImGuiKey(key)) || !ImGui::IsKeyPressed(ImGuiKey(key), false))
+                continue;
+            const std::string owner = KeyOwner(controls, chosenControl_, keySlot_, ImGuiKey(key));
+            if (owner.empty()) {
+                control.Key(keySlot_) = ImGuiKey(key);
+                askingKey_ = newControl_ = false;
+                keyRefusal_.clear();
                 SaveKeymap(device);
-                break;
+            } else {
+                keyRefusal_ = std::string(ImGui::GetKeyName(ImGuiKey(key))) + " is taken by " + owner + ".";
             }
+            break;
+        }
         return;
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
         ImGui::CloseCurrentPopup();
-    ImGui::AlignTextToFramePadding();
-    ImGui::Text("Key: %s", control.key == ImGuiKey_None ? "none" : ImGui::GetKeyName(control.key));
-    ImGui::SameLine();
-    if (ImGui::Button("Change key"))
-        askingKey_ = true;
-    const bool taken = std::any_of(controls.begin(), controls.end(), [&](const Control &other) {
-        return &other != &control && other.key == control.key;
-    });
-    if (taken && control.key != ImGuiKey_None)
-        ImGui::TextColored(kWarn, "Another control here uses this key.");
+    // A row for each key: the one of a tap, or a joystick's four.
+    for (int slot = 0; slot < control.KeyCount(); slot++) {
+        const ImGuiKey key = control.Key(slot);
+        ImGui::PushID(slot);
+        ImGui::AlignTextToFramePadding();
+        ImGui::Text("%s: %s", joystick ? kDirections[slot] : "Key", key == ImGuiKey_None ? "none" : ImGui::GetKeyName(key));
+        ImGui::SameLine(joystick ? ImGui::GetFontSize() * 7 : 0);
+        if (ImGui::Button("Change key")) {
+            askingKey_ = true;
+            keySlot_ = slot;
+        }
+        ImGui::PopID();
+    }
     if (control.type == ControlType::MultiTap) {
         int fingers = int(control.spots.size());
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
@@ -1846,17 +1960,26 @@ void App::ControlPopup(const Device &device, std::vector<Control> &controls) {
 }
 
 // Places a new control at the centre of the screen and asks for its key. It's saved once it has one.
+// A joystick needs no asking: it starts on its default keys, which other controls here give up.
 void App::AddControl(const Device &device, ControlType type) {
     std::vector<Control> &controls = keymaps_[device.id].For(OrientationOf(device)).controls;
     Control control;
     control.type = type;
+    if (type == ControlType::Joystick) {
+        for (ImGuiKey key : control.directions)
+            ClearKey(controls, key);
+        controls.push_back(control);
+        SaveKeymap(device);
+        return;
+    }
     if (type == ControlType::MultiTap) {
         SetFingerCount(control, kMinFingers);
         MoveControl(control, ImVec2(-0.06f, 0), -1);   // centred on the screen
     }
     controls.push_back(control);
     chosenControl_ = int(controls.size()) - 1;
-    askingKey_ = true;
+    keySlot_ = 0;
+    askingKey_ = newControl_ = true;
     openPopup_ = true;
 }
 
@@ -2717,7 +2840,8 @@ void App::ForceOffOverlay() {
 
 // For testing the UI where nobody watches the screen: IOS_EMULATOR_UI_START=1 starts the selected
 // device (IOS_EMULATOR_UI_FULLSCREEN=1 also shows it fullscreen, IOS_EMULATOR_UI_LANDSCAPE=1 turns
-// it, IOS_EMULATOR_UI_DEVTOOLS=1 shows the developer tools without saving that), IOS_EMULATOR_UI_PAGE=add
+// it, IOS_EMULATOR_UI_DEVTOOLS=1 shows the developer tools without saving that,
+// IOS_EMULATOR_UI_EDITOR=1 opens the controls editor), IOS_EMULATOR_UI_PAGE=add
 // opens the Add Device page (IOS_EMULATOR_UI_PRODUCT=<product type>, e.g. iPhone3,1, goes straight to
 // that device's versions), IOS_EMULATOR_UI_DROP=<file> drops that file on the window after
 // IOS_EMULATOR_UI_DROP_AFTER seconds (default 1), and IOS_EMULATOR_UI_SHOT=<file.png> saves the
@@ -2919,6 +3043,8 @@ int RunUi() {
             app.SetLandscape();
         if (EnvText("IOS_EMULATOR_UI_DEVTOOLS") == "1")
             app.ShowDevTools(true);
+        if (EnvText("IOS_EMULATOR_UI_EDITOR") == "1")
+            app.ShowEditor();
         bool shotTaken = false, fullscreen = false;
         while (!app.Finished()) {
             // Idle politely: with no device running, wait for input (or a periodic refresh).
