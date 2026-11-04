@@ -513,6 +513,7 @@ private:
     void DevListFiles(const std::string &id, const std::string &path);
     void DevListApps(const std::string &id);
     void ClosingOverlay();
+    void ForceOffOverlay();
 
     Settings settings_;
     std::vector<Device> devices_;
@@ -521,6 +522,7 @@ private:
     std::map<std::string, Texture> textures_;
     std::string error_, notice_;
     bool closing_ = false, finished_ = false;
+    std::string forceOffId_;   // the device whose "Force power off?" alert is showing, if any
     bool animating_ = false;                             // this frame shows motion, so the next must follow at once
 
     // Input state for the device on screen.
@@ -703,6 +705,8 @@ void App::Frame() {
     ImGui::EndChild();
     if (closing_)
         ClosingOverlay();
+    else if (!forceOffId_.empty())
+        ForceOffOverlay();
     ImGui::End();
 }
 
@@ -1372,10 +1376,14 @@ void App::Controls(Session &session) {
     }
 
     ImGui::SameLine(0, gap);
-    ImGui::BeginDisabled(session.state == "stopping");
-    if (IconButton(icon::kStop, "Stop", "Shut down: iOS stops cleanly, like sliding to power off."))
-        session.Stop();
-    ImGui::EndDisabled();
+    if (IconButton(icon::kStop, "Stop",
+                   session.Stopping() ? "Shutting down. If it's stuck, click to force the device off."
+                                      : "Shut down: iOS stops cleanly, like sliding to power off.")) {
+        if (session.Stopping())
+            forceOffId_ = session.GetDevice().id;
+        else
+            session.Stop();
+    }
 
     // Typing: the worker types the text into the text field that has focus in iOS (worker.h,
     // "type"). A (!) after the box tells what couldn't be typed.
@@ -2158,6 +2166,32 @@ void App::ClosingOverlay() {
         if (ImGui::Button("Quit now (the devices will check their storage next time)")) {
             for (auto &[id, session] : sessions_)
                 session->Kill();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+// Asks before forcing off a device that is shutting down. It lives here rather than in Controls()
+// so that it goes away by itself if the device finishes shutting down meanwhile.
+void App::ForceOffOverlay() {
+    auto found = sessions_.find(forceOffId_);
+    ImGui::OpenPopup("Force power off");
+    if (ImGui::BeginPopupModal("Force power off", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        bool done = found == sessions_.end();
+        if (!done) {
+            ImGui::TextUnformatted("Force power off this device?");
+            DimText("iOS will check its storage next time it starts.");
+            if (ImGui::Button("Force power off")) {
+                found->second->ForceOff();
+                done = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel"))
+                done = true;
+        }
+        if (done) {
+            forceOffId_.clear();
+            ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     }

@@ -196,7 +196,7 @@ void Session::Request(Json command, std::function<void(const Json &)> onReply) {
 }
 
 void Session::Stop() {
-    if (exited_ || stopDeadline_ != std::chrono::steady_clock::time_point::max())
+    if (exited_ || Stopping())
         return;
     state = "stopping";
     Send({{"cmd", "stop"}});
@@ -211,6 +211,11 @@ void Session::Kill() {
     }
 }
 
+void Session::ForceOff() {
+    forcedOff_ = true;
+    Kill();
+}
+
 void Session::Update() {
     std::deque<Json> events;
     bool ended;
@@ -223,7 +228,9 @@ void Session::Update() {
         HandleEvent(event);
     if (ended && !exited_) {   // the worker ended without saying goodbye: it crashed or was killed
         exited_ = true;
-        exitMessage_ = "The device stopped unexpectedly. Details are in " + PathText(WorkerLog());
+        exitClean_ = forcedOff_;   // what the user asked for is no failure, though iOS didn't shut down
+        if (!forcedOff_)
+            exitMessage_ = "The device stopped unexpectedly. Details are in " + PathText(WorkerLog());
     }
     if (exited_) {
         state = "stopped";

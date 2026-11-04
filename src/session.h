@@ -41,7 +41,9 @@ public:
 
     void Stop();      // asks iOS to shut down cleanly; Update() force-stops it after a minute
     void Kill();      // ends the worker at once (the device is marked dirty)
+    void ForceOff();  // Kill() because the user asked, so the exit isn't reported as a failure
     void Update();    // call regularly: applies the worker's events and enforces the stop deadline
+    bool Stopping() const { return stopDeadline_ != std::chrono::steady_clock::time_point::max(); }   // Stop() was called
 
     // Copies the newest screen frame (BGRA) if there is one. Returns true when the frame changed.
     bool UpdateFrame();
@@ -99,7 +101,7 @@ private:
     uint64_t nextRequest_ = 0;
     std::map<uint64_t, std::function<void(const Json &)>> pending_;
 
-    bool exited_ = false, exitClean_ = false;
+    bool exited_ = false, exitClean_ = false, forcedOff_ = false;
     std::string exitMessage_;
     std::chrono::steady_clock::time_point stopDeadline_ = std::chrono::steady_clock::time_point::max();
 };
