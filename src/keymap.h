@@ -1,10 +1,15 @@
-// Key-to-touch mapping: keyboard keys that hold fingers on the iOS screen (the Controls keyboard mode).
+// Key-to-touch mapping: keys and controller buttons that hold fingers on the iOS screen (the Controls
+// keyboard mode).
 //
 // Each device has a Keymap, kept as keymap.json in its folder, so Erase leaves it alone. It holds one
 // Layout for each orientation, because an app's buttons sit elsewhere when the device is turned.
 // A control's fingers are placed on the screen as shown; ToPanel (skin.h) turns them into touches.
 // A Tap or MultiTap has one key and holds its fingers still. A Joystick has four keys that steer one
 // finger around a ring, like a thumb on a game's on-screen stick. A key belongs to one control.
+//
+// A controller is more keys: Dear ImGui's Win32 backend reads XInput controller 0 into the
+// ImGuiKey_Gamepad* keys, with each stick as four analog keys, so a half-pushed stick steers a
+// joystick's finger halfway to its ring. keymap.json stores them by name like any other key.
 #pragma once
 
 #include "common.h"
@@ -25,9 +30,15 @@ constexpr int kJoystickKeys = 4;
 const char *const kDirections[kJoystickKeys] = {"Up", "Left", "Down", "Right"};   // the order of Control::directions
 constexpr float kJoystickRadius = 0.08f, kMinJoystickRadius = 0.04f, kMaxJoystickRadius = 0.25f;
 
+// A controller's four keys for a whole joystick, in the order of kDirections.
+constexpr std::array<ImGuiKey, kJoystickKeys> kDpadKeys = {ImGuiKey_GamepadDpadUp, ImGuiKey_GamepadDpadLeft,
+                                                           ImGuiKey_GamepadDpadDown, ImGuiKey_GamepadDpadRight};
+constexpr std::array<ImGuiKey, kJoystickKeys> kLeftStickKeys = {ImGuiKey_GamepadLStickUp, ImGuiKey_GamepadLStickLeft,
+                                                                ImGuiKey_GamepadLStickDown, ImGuiKey_GamepadLStickRight};
+
 struct Control {
-    ImGuiKey key = ImGuiKey_None;                  // the key on the keyboard; None until one is chosen.
-                                                   // A Joystick uses `directions` instead
+    ImGuiKey key = ImGuiKey_None;                  // the key or controller button; None until one is
+                                                   // chosen. A Joystick uses `directions` instead
     ControlType type = ControlType::Tap;
     std::vector<ImVec2> spots = {ImVec2(0.5f, 0.5f)};   // where each finger lands, 0 to 1 across the
                                                         // screen as shown; never empty. A Joystick has
@@ -62,13 +73,19 @@ void SetFingerCount(Control &control, int count);
 // keep their shape.
 void MoveControl(Control &control, ImVec2 by, int finger);
 
-// One frame of a joystick's finger: from `at`, towards the ring in the direction of the keys held, or
-// the centre if they cancel out, reaching it from the centre in about 3 frames. `held` has bit i set
-// for directions[i]. `aspect` is the screen's width over its height: spots are fractions of each side,
-// so a round ring needs it. A ring past the screen's edge is cut off by the edge.
-ImVec2 JoystickStep(const Control &control, unsigned held, ImVec2 at, float aspect);
+// One frame of a joystick's finger: from `at`, towards the point the keys push it to, reaching the ring
+// from the centre in about 3 frames. `strengths` are how far each of directions[] is pushed, 0 to 1: a
+// keyboard key held is 1, a key not held 0. They add up to a direction with length up to 1, so a
+// half-pushed stick stops halfway to the ring, and opposite keys held fully return it to the centre.
+// `aspect` is the screen's width over its height: spots are fractions of each side, so a round ring
+// needs it. A ring past the screen's edge is cut off by the edge.
+ImVec2 JoystickStep(const Control &control, const std::array<float, kJoystickKeys> &strengths, ImVec2 at, float aspect);
 
-// A key that can be bound to a control. F2 and F11 switch the app's modes and Esc cancels, so those can't.
+// The key keymap.json calls `name`, or None.
+ImGuiKey KeyNamed(const std::string &name);
+
+// A key that can be bound to a control: the keyboard's or the controller's. F2 and F11 switch the app's
+// modes and Esc cancels, so those can't.
 bool BindableKey(ImGuiKey key);
 
 // What else holds `key`, in words ("a tap", "this joystick's Up"), or "" if nothing does. Key number

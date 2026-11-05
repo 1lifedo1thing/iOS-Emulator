@@ -16,15 +16,8 @@ const char *TypeName(ControlType type) {
     }
 }
 
-bool KeyboardKey(int key) { return key >= ImGuiKey_NamedKey_BEGIN && key < ImGuiKey_GamepadStart; }
-
-// Keys are stored by name: ImGuiKey's numbers change between versions of Dear ImGui.
-ImGuiKey KeyNamed(const std::string &name) {
-    for (int key = ImGuiKey_NamedKey_BEGIN; KeyboardKey(key); key++)
-        if (name == ImGui::GetKeyName(ImGuiKey(key)))
-            return ImGuiKey(key);
-    return ImGuiKey_None;
-}
+// ImGuiKey lists the keyboard's keys, then the controller's, then the mouse's buttons.
+bool KeyboardOrGamepadKey(int key) { return key >= ImGuiKey_NamedKey_BEGIN && key <= ImGuiKey_GamepadRStickDown; }
 
 std::string KeyText(ImGuiKey key) { return key == ImGuiKey_None ? "" : ImGui::GetKeyName(key); }
 
@@ -144,10 +137,9 @@ void MoveControl(Control &control, ImVec2 by, int finger) {
         spot = ImVec2(spot.x + by.x, spot.y + by.y);
 }
 
-ImVec2 JoystickStep(const Control &control, unsigned held, ImVec2 at, float aspect) {
-    const auto down = [&](int direction) { return (held >> direction & 1) ? 1.0f : 0.0f; };
-    float x = down(3) - down(1), y = down(2) - down(0);   // right less left, down less up
-    if (const float length = std::hypot(x, y); length > 0) {
+ImVec2 JoystickStep(const Control &control, const std::array<float, kJoystickKeys> &strengths, ImVec2 at, float aspect) {
+    float x = strengths[3] - strengths[1], y = strengths[2] - strengths[0];   // right less left, down less up
+    if (const float length = std::hypot(x, y); length > 1) {   // two keys held make a diagonal, not a longer reach
         x /= length;
         y /= length;
     }
@@ -162,8 +154,16 @@ ImVec2 JoystickStep(const Control &control, unsigned held, ImVec2 at, float aspe
     return ImVec2(at.x + toX / distance * step, at.y + toY / distance * step * aspect);
 }
 
+// Keys are stored by name: ImGuiKey's numbers change between versions of Dear ImGui.
+ImGuiKey KeyNamed(const std::string &name) {
+    for (int key = ImGuiKey_NamedKey_BEGIN; KeyboardOrGamepadKey(key); key++)
+        if (name == ImGui::GetKeyName(ImGuiKey(key)))
+            return ImGuiKey(key);
+    return ImGuiKey_None;
+}
+
 bool BindableKey(ImGuiKey key) {
-    return KeyboardKey(key) && key != ImGuiKey_F2 && key != ImGuiKey_F11 && key != ImGuiKey_Escape;
+    return KeyboardOrGamepadKey(key) && key != ImGuiKey_F2 && key != ImGuiKey_F11 && key != ImGuiKey_Escape;
 }
 
 std::string KeyOwner(const std::vector<Control> &controls, int control, int slot, ImGuiKey key) {

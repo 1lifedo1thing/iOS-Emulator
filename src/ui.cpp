@@ -10,6 +10,7 @@
 #include "snapshot.h"
 
 #include "imgui.h"
+#include "imgui_internal.h"   // GetKeyData and IsGamepadKey, for the controller's analog keys
 #include "imgui_impl_opengl3.h"
 #include "imgui_impl_win32.h"
 #include "imgui_stdlib.h"
@@ -1249,7 +1250,46 @@ std::vector<ImVec2> ControlSpots(const Control &control, ImVec2 origin, ImVec2 s
     return spots;
 }
 
-std::string KeyLabel(ImGuiKey key) { return key == ImGuiKey_None ? "?" : ImGui::GetKeyName(key); }
+// A key's name for people. ImGui names a controller's buttons by position and its own numbers, which
+// don't say what's printed on an Xbox controller.
+std::string KeyLabel(ImGuiKey key) {
+    switch (key) {
+    case ImGuiKey_None: return "?";
+    case ImGuiKey_GamepadStart: return "Start";
+    case ImGuiKey_GamepadBack: return "Back";
+    case ImGuiKey_GamepadFaceDown: return "A";
+    case ImGuiKey_GamepadFaceRight: return "B";
+    case ImGuiKey_GamepadFaceLeft: return "X";
+    case ImGuiKey_GamepadFaceUp: return "Y";
+    case ImGuiKey_GamepadDpadUp: return "D-pad Up";
+    case ImGuiKey_GamepadDpadLeft: return "D-pad Left";
+    case ImGuiKey_GamepadDpadDown: return "D-pad Down";
+    case ImGuiKey_GamepadDpadRight: return "D-pad Right";
+    case ImGuiKey_GamepadL1: return "LB";
+    case ImGuiKey_GamepadR1: return "RB";
+    case ImGuiKey_GamepadL2: return "LT";
+    case ImGuiKey_GamepadR2: return "RT";
+    case ImGuiKey_GamepadLStickUp: return "Left stick Up";
+    case ImGuiKey_GamepadLStickLeft: return "Left stick Left";
+    case ImGuiKey_GamepadLStickDown: return "Left stick Down";
+    case ImGuiKey_GamepadLStickRight: return "Left stick Right";
+    case ImGuiKey_GamepadRStickUp: return "Right stick Up";
+    case ImGuiKey_GamepadRStickLeft: return "Right stick Left";
+    case ImGuiKey_GamepadRStickDown: return "Right stick Down";
+    case ImGuiKey_GamepadRStickRight: return "Right stick Right";
+    case ImGuiKey_GamepadL3: return "L3";
+    case ImGuiKey_GamepadR3: return "R3";
+    default: return ImGui::GetKeyName(key);
+    }
+}
+
+bool g_testGamepad = false;   // IOS_EMULATOR_UI_GAMEPAD is playing the controller, with any window in front
+
+// Whether the controller is meant for iOS. XInput answers whichever window is in front, so without
+// this, a game in another window would be pressing on the device too.
+bool GamepadInFront() {
+    return g_testGamepad || GetForegroundWindow() == static_cast<HWND>(ImGui::GetMainViewport()->PlatformHandleRaw);
+}
 
 // A control's label: its key's name, with the finger count on a multi-finger tap.
 std::string ControlLabel(const Control &control) {
@@ -1379,8 +1419,9 @@ void App::ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, Orientation 
 
 // Adds the fingers of the keys held down to `fingers`, oldest press first. A key counts from the
 // moment it's pressed in Controls mode: one held through a rotation, say, must be pressed again. A
-// joystick's finger lands at the centre and steers from the next frame on. `aspect` is the screen's
-// width over its height.
+// controller's keys count as up while another window is in front. A joystick's finger lands at the
+// centre and steers from the next frame on, by how far each of its held keys is pushed. `aspect` is
+// the screen's width over its height.
 void App::KeyFingers(Session &session, const Layout &layout, float aspect, std::vector<Finger> &fingers) {
     const ImGuiIO &io = ImGui::GetIO();
     const bool live = settings_.keyboard == KeyboardMode::Controls && !editing_ && !io.WantTextInput && !AnyPopupOpen() &&
@@ -1391,10 +1432,12 @@ void App::KeyFingers(Session &session, const Layout &layout, float aspect, std::
         return;
     }
     const std::vector<Control> &controls = layout.controls;
+    const bool inFront = GamepadInFront();
+    auto heard = [&](ImGuiKey key) { return inFront || !ImGui::IsGamepadKey(key); };
     for (HeldControl &held : heldControls_) {
         const Control &control = controls[held.control];
         for (int k = 0; k < control.KeyCount(); k++)
-            if ((held.keys >> k & 1) && !ImGui::IsKeyDown(control.Key(k)))
+            if ((held.keys >> k & 1) && !(heard(control.Key(k)) && ImGui::IsKeyDown(control.Key(k))))
                 held.keys &= ~(1u << k);
     }
     heldControls_.erase(std::remove_if(heldControls_.begin(), heldControls_.end(),
@@ -1404,8 +1447,8 @@ void App::KeyFingers(Session &session, const Layout &layout, float aspect, std::
         const Control &control = controls[index];
         for (int k = 0; k < control.KeyCount(); k++) {
             const ImGuiKey key = control.Key(k);
-            const bool ctrl = key == ImGuiKey_LeftCtrl || key == ImGuiKey_RightCtrl;
-            if (key == ImGuiKey_None || !ImGui::IsKeyPressed(key, false) || (io.KeyCtrl && !ctrl))   // Ctrl+key is a shortcut
+            const bool shortcut = io.KeyCtrl && key != ImGuiKey_LeftCtrl && key != ImGuiKey_RightCtrl && !ImGui::IsGamepadKey(key);
+            if (key == ImGuiKey_None || !heard(key) || !ImGui::IsKeyPressed(key, false) || shortcut)
                 continue;
             auto held = std::find_if(heldControls_.begin(), heldControls_.end(),
                                      [&](const HeldControl &h) { return h.control == index; });
@@ -1415,8 +1458,14 @@ void App::KeyFingers(Session &session, const Layout &layout, float aspect, std::
         }
     }
     for (HeldControl &held : heldControls_) {
-        if (held.landed && controls[held.control].type == ControlType::Joystick)
-            held.at = JoystickStep(controls[held.control], held.keys, held.at, aspect);
+        const Control &control = controls[held.control];
+        if (held.landed && control.type == ControlType::Joystick) {
+            std::array<float, kJoystickKeys> strengths{};   // only held keys: one down from before doesn't count
+            for (int k = 0; k < kJoystickKeys; k++)
+                if (held.keys >> k & 1)
+                    strengths[k] = ImGui::GetKeyData(control.directions[k])->AnalogValue;
+            held.at = JoystickStep(control, strengths, held.at, aspect);
+        }
         held.landed = true;
     }
 
@@ -1670,21 +1719,32 @@ void App::FullscreenControls(Session &session) {
 // ---- Keyboard --------------------------------------------------------------------------------
 
 // The hardware shortcuts: H Home, P Sleep/Wake, + and - volume (held while the key is), R rotates,
-// arrows tilt. In Typing and Controls modes the keys do something else, so these take Ctrl.
+// arrows tilt. In Typing and Controls modes the keys do something else, so these take Ctrl. In
+// Controls mode a controller has them too, without Ctrl: Back Home, Start Sleep/Wake, LB and RB volume
+// down and up, each only while no control has that button.
 void App::HardwareKeys(Session &session) {
     const ImGuiIO &io = ImGui::GetIO();
     const bool typing = io.WantTextInput || editorPopup_ || AnyPopupOpen() || session.Stopping() || session.saving;
     const bool modifiers = io.KeyCtrl == settings_.ShortcutsTakeCtrl() && !io.KeyAlt && !io.KeyShift;
     auto key = [&](ImGuiKey k) { return !typing && modifiers && ImGui::IsKeyDown(k); };
-    const std::pair<bool, int> buttons[] = {
-        {key(ImGuiKey_H), QEMU_IOS_BUTTON_HOME},
-        {key(ImGuiKey_P), QEMU_IOS_BUTTON_POWER},
-        {key(ImGuiKey_Equal) || key(ImGuiKey_KeypadAdd), QEMU_IOS_BUTTON_VOLUME_UP},
-        {key(ImGuiKey_Minus) || key(ImGuiKey_KeypadSubtract), QEMU_IOS_BUTTON_VOLUME_DOWN},
+    const Device &device = session.GetDevice();
+    const std::vector<Control> &controls = keymaps_[device.id].For(OrientationOf(device)).controls;
+    auto pad = [&](ImGuiKey k) {
+        return !typing && settings_.keyboard == KeyboardMode::Controls && ImGui::IsKeyDown(k) &&
+               KeyOwner(controls, -1, 0, k).empty();
     };
+    const std::pair<bool, int> buttons[] = {
+        {key(ImGuiKey_H) || pad(ImGuiKey_GamepadBack), QEMU_IOS_BUTTON_HOME},
+        {key(ImGuiKey_P) || pad(ImGuiKey_GamepadStart), QEMU_IOS_BUTTON_POWER},
+        {key(ImGuiKey_Equal) || key(ImGuiKey_KeypadAdd) || pad(ImGuiKey_GamepadR1), QEMU_IOS_BUTTON_VOLUME_UP},
+        {key(ImGuiKey_Minus) || key(ImGuiKey_KeypadSubtract) || pad(ImGuiKey_GamepadL1), QEMU_IOS_BUTTON_VOLUME_DOWN},
+    };
+    const bool inFront = GamepadInFront();
     for (const auto &[down, button] : buttons) {
         if (!down)
             ignoredButtons_.erase(button);
+        else if (!inFront)                    // only the controller gets here: it stays ignored until it comes up,
+            ignoredButtons_.insert(button);   // so coming back to this window with it held doesn't press it
         if (down == bool(heldButtons_.count(button)) || ignoredButtons_.count(button))
             continue;
         if (down)
@@ -1858,7 +1918,7 @@ void App::Controls(Session &session) {
         if (ImGui::Button("Add Joystick"))
             AddControl(device, ControlType::Joystick);
         Tooltip("Four keys that steer one finger around a ring. It starts on W, A, S and D, taking them from any "
-                "other control here.");
+                "other control here. Right-click it for a controller's D-pad or left stick.");
         return;
     }
 
@@ -2009,7 +2069,7 @@ void App::ControlPopup(const Device &device, std::vector<Control> &controls) {
 
     const bool joystick = control.type == ControlType::Joystick;
     if (askingKey_) {
-        ImGui::Text("Press a key%s%s...", joystick ? " for " : "", joystick ? kDirections[keySlot_] : "");
+        ImGui::Text("Press a key or controller button%s%s...", joystick ? " for " : "", joystick ? kDirections[keySlot_] : "");
         if (!keyRefusal_.empty())
             ImGui::TextColored(kWarn, "%s", keyRefusal_.c_str());
         DimText("Esc cancels");
@@ -2022,7 +2082,8 @@ void App::ControlPopup(const Device &device, std::vector<Control> &controls) {
             return;
         }
         for (int key = ImGuiKey_NamedKey_BEGIN; key < ImGuiKey_NamedKey_END; key++) {
-            if (!BindableKey(ImGuiKey(key)) || !ImGui::IsKeyPressed(ImGuiKey(key), false))
+            if (!BindableKey(ImGuiKey(key)) || !ImGui::IsKeyPressed(ImGuiKey(key), false) ||
+                (ImGui::IsGamepadKey(ImGuiKey(key)) && !GamepadInFront()))
                 continue;
             const std::string owner = KeyOwner(controls, chosenControl_, keySlot_, ImGuiKey(key));
             if (owner.empty()) {
@@ -2031,7 +2092,7 @@ void App::ControlPopup(const Device &device, std::vector<Control> &controls) {
                 keyRefusal_.clear();
                 SaveKeymap(device);
             } else {
-                keyRefusal_ = std::string(ImGui::GetKeyName(ImGuiKey(key))) + " is taken by " + owner + ".";
+                keyRefusal_ = KeyLabel(ImGuiKey(key)) + " is taken by " + owner + ".";
             }
             break;
         }
@@ -2045,13 +2106,30 @@ void App::ControlPopup(const Device &device, std::vector<Control> &controls) {
         const ImGuiKey key = control.Key(slot);
         ImGui::PushID(slot);
         ImGui::AlignTextToFramePadding();
-        ImGui::Text("%s: %s", joystick ? kDirections[slot] : "Key", key == ImGuiKey_None ? "none" : ImGui::GetKeyName(key));
-        ImGui::SameLine(joystick ? ImGui::GetFontSize() * 7 : 0);
+        ImGui::Text("%s: %s", joystick ? kDirections[slot] : "Key", key == ImGuiKey_None ? "none" : KeyLabel(key).c_str());
+        ImGui::SameLine(joystick ? ImGui::GetFontSize() * 10 : 0);   // room for "Left: Left stick Left"
         if (ImGui::Button("Change key")) {
             askingKey_ = true;
             keySlot_ = slot;
         }
         ImGui::PopID();
+    }
+    if (joystick) {
+        // All four keys at once. Like Add Joystick, it takes them from any other control here.
+        auto preset = [&](const char *name, const std::array<ImGuiKey, kJoystickKeys> &keys) {
+            if (!ImGui::Button(name))
+                return;
+            for (ImGuiKey key : keys)
+                ClearKey(controls, key);
+            control.directions = keys;
+            SaveKeymap(device);
+        };
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Use:");
+        ImGui::SameLine();
+        preset("D-pad", kDpadKeys);
+        ImGui::SameLine();
+        preset("Left stick", kLeftStickKeys);
     }
     if (control.type == ControlType::MultiTap) {
         int fingers = int(control.spots.size());
@@ -3376,10 +3454,41 @@ void App::Toast() {
 // window after IOS_EMULATOR_UI_SHOT_AFTER seconds (default 5) and closes the app.
 // IOS_EMULATOR_UI_SLOTS=1 opens the selected device's save states, IOS_EMULATOR_UI_SAVE_AFTER=<s>
 // quick saves after that many seconds, and IOS_EMULATOR_UI_ASK_LOAD_AFTER=<s> does what F9 does.
+// IOS_EMULATOR_UI_GAMEPAD=<key>,<seconds>[,<analog>] holds a controller key, named as in keymap.json
+// (e.g. GamepadLStickRight), that long and that far (default 1), starting
+// IOS_EMULATOR_UI_GAMEPAD_AFTER seconds in (default 1). It works with any window in front.
 std::string EnvText(const char *name) {
     const char *value = getenv(name);
     return value ? value : "";
 }
+
+// A controller key held down for testing (IOS_EMULATOR_UI_GAMEPAD), since nothing outside can fake XInput.
+struct TestGamepad {
+    ImGuiKey key = ImGuiKey_None;
+    double from = 0, to = 0;   // seconds after the start
+    float analog = 1;
+
+    // From "<key>,<seconds>[,<analog>]" and the seconds to wait.
+    TestGamepad(const std::string &text, double after) : from(after) {
+        char name[64] = "";
+        double seconds = 0;
+        if (sscanf(text.c_str(), "%63[^,],%lf,%f", name, &seconds, &analog) >= 2)
+            key = KeyNamed(name);
+        to = from + seconds;
+        g_testGamepad = key != ImGuiKey_None;
+    }
+
+    // Each frame, after the backend has read the real controller, so this has the last word. ImGui
+    // wipes the controller's keys unless the backend says it has one, and it says so only if it does.
+    void Feed(double now) const {
+        if (key == ImGuiKey_None)
+            return;
+        const bool down = now >= from && now < to;
+        ImGuiIO &io = ImGui::GetIO();
+        io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+        io.AddKeyAnalogEvent(key, down, down ? analog : 0);
+    }
+};
 
 // Posts what Windows sends the window when a file is dropped on it (for IOS_EMULATOR_UI_DROP).
 void PostDrop(HWND hwnd, const std::string &file) {
@@ -3561,6 +3670,8 @@ int RunUi() {
         const double shotAfter = EnvText("IOS_EMULATOR_UI_SHOT_AFTER").empty() ? 5.0 : atof(EnvText("IOS_EMULATOR_UI_SHOT_AFTER").c_str());
         std::string drop = EnvText("IOS_EMULATOR_UI_DROP");
         const double dropAfter = EnvText("IOS_EMULATOR_UI_DROP_AFTER").empty() ? 1.0 : atof(EnvText("IOS_EMULATOR_UI_DROP_AFTER").c_str());
+        const TestGamepad gamepad(EnvText("IOS_EMULATOR_UI_GAMEPAD"),
+                                  EnvText("IOS_EMULATOR_UI_GAMEPAD_AFTER").empty() ? 1.0 : atof(EnvText("IOS_EMULATOR_UI_GAMEPAD_AFTER").c_str()));
         const uint64_t started = NowNs();
         if (EnvText("IOS_EMULATOR_UI_START") == "1")
             app.StartSelected();
@@ -3601,6 +3712,7 @@ int RunUi() {
             }
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplWin32_NewFrame();
+            gamepad.Feed((NowNs() - started) / 1e9);
             ImGui::NewFrame();
             if (!saved && (NowNs() - started) / 1e9 > atof(saveAfter.c_str())) {
                 app.QuickSave();

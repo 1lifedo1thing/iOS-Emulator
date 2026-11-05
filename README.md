@@ -38,6 +38,8 @@ It is heavily WIP and still has bugs.
    | F5 | Quick save (Ctrl+F5 in Typing and Controls modes) |
    | F9 | Quick load, after asking (Ctrl+F9 in Typing and Controls modes) |
    | F11 | Fullscreen (F11 or Esc leaves it) |
+   | Back / Start on a controller | Home / Sleep-Wake (held while the button is), in Controls mode |
+   | LB / RB on a controller | Volume down / up, in Controls mode |
 
    The toolbar under the device has Rotate, Pause, Screenshot, Record, Fullscreen, Save state, Load
    state, Sound, Internet, Web proxy and Stop; hover a button to see what it does. The row under it has
@@ -81,16 +83,24 @@ centre), and lifts when all four are up. F2 or a click on the mode button under 
 **Controls** mode on and off (you can also choose it in Settings), and the shortcuts take Ctrl there
 too.
 
+An Xbox (XInput) controller works in **Controls** mode, plugged in before or after the app starts. Its
+buttons, triggers and stick directions can be bound like keys, and a joystick on a stick follows how
+far it's pushed: halfway out puts the finger halfway to the ring. Back, Start, LB and RB work the
+hardware buttons (see above) unless a control has that button, which then wins. The first controller
+is the only one read, and it's ignored while another window is in front, so playing something else
+doesn't touch iOS.
+
 | In the editor (**Edit controls** under the device) | Does |
 | --- | --- |
-| **Add Tap** / **Add Multi-finger tap** | Places a control at the centre, then asks for its key |
+| **Add Tap** / **Add Multi-finger tap** | Places a control at the centre, then asks for its key or controller button |
 | **Add Joystick** | Places a joystick at the centre on W, A, S and D, taking those keys from other controls, which then show `?` |
 | Drag a circle | Places that finger |
 | Drag a multi-finger tap's label | Moves all its fingers together |
 | Drag a joystick's centre / rim | Moves it / resizes it |
-| Right-click a circle, label, or a joystick's centre or rim | Change its keys, delete it, and set a multi-finger tap's number of fingers |
+| Right-click a circle, label, or a joystick's centre or rim | Change its keys, delete it, set a multi-finger tap's number of fingers, and put a joystick on a controller's **D-pad** or **Left stick** |
 
-A key belongs to one control per layout: the editor turns down a key that's already taken.
+A key belongs to one control per layout: the editor turns down a key that's already taken. The
+**D-pad** and **Left stick** buttons, like **Add Joystick**, take their keys from other controls.
 
 Portrait and landscape have separate layouts, each device has its own, and the mouse still works on
 the rest of the screen while you edit. Outside the editor, faint labels show the controls (**Show
