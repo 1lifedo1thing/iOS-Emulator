@@ -35,13 +35,31 @@ It is heavily WIP and still has bugs.
    | Arrow keys | Tilt the device (for games steered by tilting) |
    | The box under the device | Types text into iOS |
    | F2, or the mode button | Controls mode on or off: keys hold fingers on the screen |
+   | F5 | Quick save (Ctrl+F5 in Typing and Controls modes) |
+   | F9 | Quick load, after asking (Ctrl+F9 in Typing and Controls modes) |
    | F11 | Fullscreen (F11 or Esc leaves it) |
 
-   The toolbar under the device has Rotate, Pause, Screenshot, Fullscreen, Sound, Internet, Web proxy and
-   Stop; hover a button to see what it does. The row under it has the keyboard's mode button and **Edit
-   controls**.
+   The toolbar under the device has Rotate, Pause, Screenshot, Record, Fullscreen, Save state, Load
+   state, Sound, Internet, Web proxy and Stop; hover a button to see what it does. The row under it has
+   the keyboard's mode button and **Edit controls**.
 3. **Stop** shuts iOS down cleanly, like sliding to power off. Each device keeps its own storage; the
-   prepared system is never changed, and **Erase** brings a device back to it.
+   prepared system is never changed, and **Erase** brings a device back to it, deleting its save
+   states too.
+
+**Save states** work as on a console emulator: save the running device, and later carry on from that
+exact moment, with the same app open. Each device has one quick save, which F5 replaces, and any
+number of named ones, from the Save state button. The guest stands still while it saves, which takes
+about a second on an iPod touch. Load state lists them with a thumbnail, the time and the size, and
+renames or deletes them. A stopped device can load too, from **Save states...** under Start.
+
+A load replaces what the device has stored now, so it asks first (Enter goes ahead). iOS is not shut
+down: the running session ends at once, and the slot takes over within seconds, turned the way it was
+saved. **Stop** then shuts down as usual. Connections that were open when it was saved are gone, USB
+services can take about 40 s to come back, and the clock is put right within a few seconds, though
+the status bar may show the old time until the minute changes. A slot takes about the device's memory
+plus its storage on disk, and it only loads with the engine that saved it, so an emulator update can
+leave a slot behind; the list says so. If a load is cut short, the app says so the next time it starts
+and offers to load again or erase, since the device can't start with half of its storage.
 
 **Fullscreen** (the button or F11) shows only the device's screen, as large as the monitor allows.
 Moving the mouse brings up controls for volume, Home, Sleep/Wake, Rotate and leaving fullscreen; they
@@ -133,7 +151,7 @@ iOS-Emulator --import <LightTouch device folder>       copies a LightTouch devic
 iOS-Emulator --run <device> [--seconds N] [--screenshot shot.png] [--internet] [--no-web-proxy]
              [--tap x,y,t] [--swipe x,y,toX,toY,t[,seconds]]
              [--request t '<json>'] [--send t '<json>'] [--shot t shot.png]
-             [--save-snapshot t NAME] [--snapshot NAME]
+             [--save-snapshot t NAME] [--snapshot NAME] [--load-state NAME]
 ```
 
 `--run` boots a device, performs the taps, swipes and commands at the given times (screen
@@ -152,7 +170,9 @@ iOS-Emulator --run "My iPod" --seconds 120 --request 90 "{\"cmd\":\"shell\",\"co
 To test without waiting for a boot, save the running machine once with `--save-snapshot 90 booted`
 (at 90 s, under the name `booted`), then start later runs with `--snapshot booted`: iOS is back where
 it was within seconds. Such a run works on a throwaway copy of the snapshot's storage, so the device
-itself is never changed and every run starts the same.
+itself is never changed and every run starts the same. These are ordinary slots, so they also show in
+the window's list. `--load-state NAME` loads one the way the window does: it replaces the device's
+storage, and the run ends with a normal iOS shutdown.
 
 In Windows PowerShell 5.1, JSON containing spaces gets mangled on the way to the program; put such a
 command line in a `.cmd` file instead.
@@ -199,15 +219,17 @@ iOS-Emulator.exe (the window)                 iOS-Emulator.exe --worker (one per
 | `src/proxy.cpp` | The guest's web proxy (OpenSSL) |
 | `src/firmware.cpp` | The firmware catalog, downloads and firmwarekit |
 | `src/library.cpp` | Devices on disk |
-| `src/snapshot.cpp` | Saving a running machine and starting from it (for quick test runs) |
+| `src/snapshot.cpp` | Save states: saving a running machine and carrying on from it, and quick test runs |
 | `src/common.cpp` | Shared helpers: folders, files, hashing, child processes, shared frames |
 
 ### Where things are
 
 `%LOCALAPPDATA%\iOS-Emulator` holds `library\records\<id>\` (one folder per device: `base\` as prepared,
-`state\` with everything it wrote, `snapshots\`, `keymap.json`, `record.json`), `pairing\` (USB pairing records), `network\<id>\`
-(each device's web proxy certificate), `logs\` (`app.log`, `worker-*.log`, `usbmuxd-*.log`,
-`firmwarekit.log`) and `settings.json`. Screenshots go to `Pictures\iOS-Emulator`.
+`state\` with everything it wrote, `snapshots\<name>\` with its save states, `keymap.json`,
+`record.json`), `pairing\` (USB pairing records), `network\<id>\` (each device's web proxy certificate),
+`logs\` (`app.log`, `worker-*.log`, `usbmuxd-*.log`, `firmwarekit.log`) and `settings.json`. A save state
+holds `machine.state`, a copy of `state\`, `thumbnail.png` and `slot.json`. Screenshots go to
+`Pictures\iOS-Emulator`.
 
 ## To be added
 
@@ -216,7 +238,6 @@ iOS-Emulator.exe (the window)                 iOS-Emulator.exe --worker (one per
 * Deep gaming functionality and controller support
 * Stability fixes for experimental iOS and devices
 * Newer devices
-* Save states
 * Full engine optimization
 * Jailbreaking on experimental devices and iOS, along with jailbreak a device that wasn't jailbroken on setup
 * Upgrading iOS from an older version

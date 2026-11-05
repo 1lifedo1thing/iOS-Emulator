@@ -7,6 +7,7 @@
 #include "keymap.h"
 #include "session.h"
 #include "skin.h"
+#include "snapshot.h"
 
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
@@ -20,6 +21,7 @@
 #include <shlobj.h>
 
 #include <cmath>
+#include <ctime>
 #include <functional>
 #include <memory>
 #include <set>
@@ -47,14 +49,14 @@ const char *const kKeyboardModes[] = {"Shortcuts", "Typing", "Controls"};   // b
 
 // The app's preferences, kept in <data>\settings.json.
 struct Settings {
-    bool internet = false;     // new sessions start with guest internet on
+    bool internet = true;      // new sessions start with guest internet on
     bool webProxy = true;      // ...and HTTPS through the web proxy (proxy.h)
     bool headphones = false;   // route sound to the headphone jack
     bool muted = false;
     bool smooth = true;        // smooth scaling of the screen (off: sharp pixels)
     bool tilt = true;          // arrow keys tilt the device
-    KeyboardMode keyboard = KeyboardMode::Shortcuts;
-    KeyboardMode beforeControls = KeyboardMode::Shortcuts;   // the mode F2 goes back to
+    KeyboardMode keyboard = KeyboardMode::Typing;
+    KeyboardMode beforeControls = KeyboardMode::Typing;   // the mode F2 goes back to
     bool showControls = true;  // faint labels show where the controls are, in Controls mode
     bool devTools = false;     // the developer tools show beside a running device
     std::string selected;      // the device selected last
@@ -261,6 +263,8 @@ const char *const kRotate = "", *const kPause = "", *const kPlay = "", 
                   *const kLeft = "", *const kRight = "";
 const char *const kRecord = "\xEE\x9F\x88";   // U+E7C8
 const char *const kEdit = "\xEE\x9C\x8F";     // U+E70F
+const char *const kSave = "\xEE\x9D\x8E";     // U+E74E
+const char *const kLoad = "\xEE\xA0\x9C";     // U+E81C
 }
 
 // A toolbar button: its icon (or `name`, without the icon font), drawn highlighted while `on`, and in
@@ -288,6 +292,9 @@ float IconButtonWidth(const char *name) {
 }
 
 float ButtonWidth(const char *label) { return ImGui::CalcTextSize(label).x + ImGui::GetStyle().FramePadding.x * 2; }
+
+// A popup of ours is open, so the keys belong to it rather than to iOS.
+bool AnyPopupOpen() { return ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel); }
 
 // Moves the cursor so that a row `width` pixels wide is centred in the space left on this line.
 void CenterRow(float width) {
@@ -536,6 +543,19 @@ public:
             heldDevice_ = device->id;
         }
     }
+    void ShowSaveStates() {                            // for tests: the selected device's list
+        if (Device *device = Selected())
+            OpenSlots(*device);
+    }
+    void AskQuickLoad() {                              // for tests: as F9 does
+        if (Device *device = Selected())
+            AskLoad(*device, kQuickSlot);
+    }
+    void QuickSave() {                                 // for tests: as F5 does
+        Device *device = Selected();
+        if (Session *session = device ? SessionFor(*device) : nullptr)
+            SaveSlot(*session, kQuickSlot);
+    }
 
 private:
     enum class Page { Device, AddDevice, Settings };
@@ -543,7 +563,9 @@ private:
     void Reload();
     Device *Selected();
     Session *SessionFor(const Device &device);
+    SessionOptions NewSessionOptions() const;
     void StartDevice(const Device &device);
+    void Launch(const Device &device, const SessionOptions &options);
     void UpdateSessions();
 
     void Sidebar();
@@ -572,6 +594,7 @@ private:
     void SendKeys(Session &session);
     void SaveScreenshot(Session &session);
     void ToggleRecording(Session &session);
+    float ToolbarWidth(const Session &session) const;
     void Rotate(const Device &device);
     Orientation OrientationOf(const Device &device) {
         auto found = orientations_.find(device.id);
@@ -591,6 +614,22 @@ private:
     void InstallDropped(Session &session, const fs::path &file, bool package);
     void ClosingOverlay();
     void ForceOffOverlay();
+
+    void SaveStateKeys(Device *device, Session *session);
+    void SaveSlot(Session &session, const std::string &name);
+    void SaveStatePopup(Session &session);
+    void OpenSlots(const Device &device);
+    void CloseSlots();
+    const Texture &SlotPicture(const SaveState &slot);
+    void SlotRow(const Device &device, const SaveState &slot, bool &changed);
+    void SaveStatesPopup();
+    void AskLoad(const Device &device, const std::string &name);
+    void ConfirmLoadPopup();
+    void LoadSlot(const Device &device, const SaveState &slot);
+    void InterruptedLoadPopup();
+    void SaveStateOverlays();
+    void ShowToast(const std::string &text);
+    void Toast();
 
     Settings settings_;
     std::vector<Device> devices_;
@@ -633,6 +672,17 @@ private:
     // Fullscreen: only the selected device's screen, with controls that show while the mouse moves.
     bool fullscreen_ = false;
     double controlsShownAt_ = 0;   // ImGui::GetTime() of the last mouse activity
+
+    // Save states (snapshot.h).
+    std::string slotsFor_;                               // the device whose list is open, if any
+    std::vector<SaveState> slots_;                       // ...and its slots
+    std::map<std::string, Texture> slotPictures_;        // their thumbnails, while the list is open
+    std::string slotName_, renamingSlot_;                // the name being typed; the slot being renamed
+    SaveState askLoad_;                                  // the slot waiting for "Load" (an empty name: none)
+    std::string askLoadDevice_;                          // ...and its device
+    std::set<std::string> interrupted_;                  // devices whose load was cut short (InterruptedLoad)
+    std::string toast_;                                  // a short message over everything
+    double toastUntil_ = 0;
 
     // The Add Device page: a grid of devices, then the chosen one's versions on a wheel.
     std::unique_ptr<Preparation> preparation_;
@@ -678,6 +728,9 @@ void App::Reload() {
     devices_ = ListDevices();
     if (settings_.selected.empty() && !devices_.empty())
         settings_.selected = devices_[0].id;
+    for (const auto &device : devices_)
+        if (!InterruptedLoad(device).empty())
+            interrupted_.insert(device.id);
 }
 
 Device *App::Selected() {
@@ -692,13 +745,25 @@ Session *App::SessionFor(const Device &device) {
     return found != sessions_.end() ? found->second.get() : nullptr;
 }
 
+SessionOptions App::NewSessionOptions() const {
+    SessionOptions options;
+    options.internet = settings_.internet;
+    options.webProxy = settings_.webProxy;
+    options.headphones = settings_.headphones;
+    options.muted = settings_.muted;
+    options.saveSnapshots = true;   // save states always work
+    return options;
+}
+
 void App::StartDevice(const Device &device) {
+    if (!InterruptedLoad(device).empty())
+        interrupted_.insert(device.id);   // it can't start: InterruptedLoadPopup says why
+    else
+        Launch(device, NewSessionOptions());
+}
+
+void App::Launch(const Device &device, const SessionOptions &options) {
     try {
-        SessionOptions options;
-        options.internet = settings_.internet;
-        options.webProxy = settings_.webProxy;
-        options.headphones = settings_.headphones;
-        options.muted = settings_.muted;
         sessions_[device.id] = std::make_unique<Session>(device, options);
         keymaps_[device.id] = Keymap::Load(device.KeymapFile());
         error_.clear();
@@ -722,6 +787,8 @@ void App::UpdateSessions() {
         if (session.Exited()) {
             if (!session.ExitedCleanly())
                 error_ = session.GetDevice().name + ": " + session.ExitMessage();
+            if (!InterruptedLoad(session.GetDevice()).empty())
+                interrupted_.insert(it->first);
             textures_[it->first].Release();
             textures_.erase(it->first);
             orientations_.erase(it->first);   // it starts upright next time
@@ -755,7 +822,7 @@ void App::Frame() {
     if (ImGui::IsKeyPressed(ImGuiKey_F11, false) && !fullscreen_) {
         if (!editorPopup_)
             EnterFullscreen();
-    } else if (ImGui::IsKeyPressed(ImGuiKey_F11, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+    } else if (ImGui::IsKeyPressed(ImGuiKey_F11, false) || (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !AnyPopupOpen())) {
         fullscreen_ = false;
     }
     if (!shown || closing_)
@@ -766,10 +833,13 @@ void App::Frame() {
     // F2 turns Controls mode on and off while a device is on screen.
     if (shown && ImGui::IsKeyPressed(ImGuiKey_F2, false) && !ImGui::GetIO().WantTextInput && !editorPopup_)
         ToggleControlsMode();
+    SaveStateKeys(shownDevice, shown);
     WatchHeldInput(shown);
 
     if (fullscreen_) {
         FullscreenView(*shown);
+        SaveStateOverlays();
+        Toast();
         return;
     }
 
@@ -819,7 +889,10 @@ void App::Frame() {
         ClosingOverlay();
     else if (!forceOffId_.empty())
         ForceOffOverlay();
+    else
+        SaveStateOverlays();
     ImGui::End();
+    Toast();
 }
 
 void App::Sidebar() {
@@ -875,7 +948,7 @@ void App::DevicePage(Device &device) {
     if (session) {
         ImGui::SameLine();
         const bool running = session->state == "running";
-        ImGui::TextColored(running ? kGood : kWarn, "%s", session->state.c_str());
+        ImGui::TextColored(running ? kGood : kWarn, "%s", session->saving ? "saving" : session->state.c_str());
         if (session->recording) {
             const int seconds = int((NowNs() - session->recordingSince) / 1'000'000'000);
             ImGui::SameLine();
@@ -919,9 +992,13 @@ void App::StoppedDeviceView(Device &device) {
     DimText(internet);
 
     ImGui::Spacing();
-    const float manageWidth = ButtonWidth("Rename") + ButtonWidth("Erase...") + ButtonWidth("Delete...") +
-                              ButtonWidth("Open folder") + style.ItemSpacing.x * 3;
+    const float manageWidth = ButtonWidth("Save states...") + ButtonWidth("Rename") + ButtonWidth("Erase...") +
+                              ButtonWidth("Delete...") + ButtonWidth("Open folder") + style.ItemSpacing.x * 4;
     CenterRow(manageWidth);
+    if (ImGui::Button("Save states..."))
+        OpenSlots(device);
+    Tooltip(("Carry on from a saved state (" + settings_.Shortcut("F9") + " loads the quick save).").c_str());
+    ImGui::SameLine();
     if (ImGui::Button("Rename")) {
         renameText_ = device.name;
         ImGui::OpenPopup("Rename");
@@ -929,7 +1006,7 @@ void App::StoppedDeviceView(Device &device) {
     ImGui::SameLine();
     if (ImGui::Button("Erase..."))
         ImGui::OpenPopup("Erase");
-    Tooltip("Back to the freshly prepared system: deletes apps, settings and files added since.");
+    Tooltip("Back to the freshly prepared system: deletes apps, settings and files added since, and its save states.");
     ImGui::SameLine();
     if (ImGui::Button("Delete..."))
         ImGui::OpenPopup("Delete");
@@ -950,7 +1027,8 @@ void App::StoppedDeviceView(Device &device) {
         ImGui::EndPopup();
     }
     if (ImGui::BeginPopupModal("Erase", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("Erase %s? Everything added since it was prepared is removed.", device.name.c_str());
+        ImGui::Text("Erase %s? Everything added since it was prepared is removed, and so are its save states.",
+                    device.name.c_str());
         if (ImGui::Button("Erase")) {
             EraseDevice(device);
             notice_ = device.name + " was erased.";
@@ -982,7 +1060,8 @@ void App::StoppedDeviceView(Device &device) {
 // tools beside it when they're shown (the tab at the device's right edge shows and hides them).
 void App::RunningDeviceView(Device &device, Session &session) {
     const float avail = ImGui::GetContentRegionAvail().x;
-    const float column = settings_.devTools ? std::max(avail * 0.46f, 380.0f) : avail;
+    const float padding = ImGui::GetStyle().WindowPadding.x * 2;
+    const float column = settings_.devTools ? std::max(avail * 0.46f, ToolbarWidth(session) + padding) : avail;
     ImGui::BeginChild("device", ImVec2(column, 0), 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     const float tab = ImGui::GetFontSize() * 1.6f;
     const float controls = ImGui::GetFrameHeightWithSpacing() * 2 + ImGui::GetStyle().ItemSpacing.y + 4;
@@ -1125,6 +1204,19 @@ ImVec2 App::ScreenSize(Session &session, bool &turned) {
     return turned ? ImVec2(height, width) : ImVec2(width, height);
 }
 
+// Draws a frame of the panel into the rectangle at `min`, turned to `orientation`: each corner shows
+// the pixel the turns put there.
+void DrawPanel(ImDrawList *draw, const Texture &texture, ImVec2 min, ImVec2 size, Orientation orientation, bool turned) {
+    const ImVec2 max(min.x + size.x, min.y + size.y);
+    const ImVec2 corner[4] = {min, ImVec2(max.x, min.y), max, ImVec2(min.x, max.y)};
+    const ImVec2 shown[4] = {ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1)};
+    ImVec2 uv[4];
+    for (int i = 0; i < 4; i++)
+        uv[i] = ToPanel(shown[i], orientation, turned);
+    draw->AddImageQuad(ImTextureID(intptr_t(texture.id)), corner[0], corner[1], corner[2], corner[3], uv[0], uv[1], uv[2],
+                       uv[3]);
+}
+
 // Draws the screen into the rectangle at `screen` (as shown, turned to `orientation`) and makes it
 // touchable.
 void App::DrawScreen(Session &session, ImVec2 screen, ImVec2 screenSize, Orientation orientation) {
@@ -1133,17 +1225,13 @@ void App::DrawScreen(Session &session, ImVec2 screen, ImVec2 screenSize, Orienta
     const Texture &texture = textures_[session.GetDevice().id];
     ImDrawList *draw = ImGui::GetWindowDrawList();
     const ImVec2 screenEnd(screen.x + screenSize.x, screen.y + screenSize.y);
-    if (texture.id && !session.sleeping) {   // each corner shows the pixel the turns put there
-        const ImVec2 corner[4] = {screen, ImVec2(screenEnd.x, screen.y), screenEnd, ImVec2(screen.x, screenEnd.y)};
-        const ImVec2 shown[4] = {ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1)};
-        ImVec2 uv[4];
-        for (int i = 0; i < 4; i++)
-            uv[i] = ToPanel(shown[i], orientation, turned);
-        draw->AddImageQuad(ImTextureID(intptr_t(texture.id)), corner[0], corner[1], corner[2], corner[3], uv[0], uv[1],
-                           uv[2], uv[3]);
+    if (texture.id && !session.sleeping) {
+        DrawPanel(draw, texture, screen, screenSize, orientation, turned);
     } else {
         draw->AddRectFilled(screen, screenEnd, IM_COL32(0, 0, 0, 255));
-        const char *text = !texture.id ? "Starting iOS..." : "Display off: click to wake";
+        const char *text = session.state == "loading" ? "Loading..."
+                           : !texture.id              ? "Starting iOS..."
+                                                      : "Display off: click to wake";
         const ImVec2 size = ImGui::CalcTextSize(text);
         draw->AddText(ImVec2(screen.x + (screenSize.x - size.x) / 2, screen.y + (screenSize.y - size.y) / 2),
                       IM_COL32(200, 200, 200, 255), text);
@@ -1295,8 +1383,9 @@ void App::ScreenTouch(Session &session, ImVec2 origin, ImVec2 size, Orientation 
 // width over its height.
 void App::KeyFingers(Session &session, const Layout &layout, float aspect, std::vector<Finger> &fingers) {
     const ImGuiIO &io = ImGui::GetIO();
-    const bool live = settings_.keyboard == KeyboardMode::Controls && !editing_ && !io.WantTextInput &&
-                      session.state == "running" && !session.paused && !session.sleeping && !session.Stopping();
+    const bool live = settings_.keyboard == KeyboardMode::Controls && !editing_ && !io.WantTextInput && !AnyPopupOpen() &&
+                      session.state == "running" && !session.paused && !session.saving && !session.sleeping &&
+                      !session.Stopping();
     if (!live) {
         heldControls_.clear();
         return;
@@ -1584,7 +1673,7 @@ void App::FullscreenControls(Session &session) {
 // arrows tilt. In Typing and Controls modes the keys do something else, so these take Ctrl.
 void App::HardwareKeys(Session &session) {
     const ImGuiIO &io = ImGui::GetIO();
-    const bool typing = io.WantTextInput || editorPopup_ || session.Stopping();
+    const bool typing = io.WantTextInput || editorPopup_ || AnyPopupOpen() || session.Stopping() || session.saving;
     const bool modifiers = io.KeyCtrl == settings_.ShortcutsTakeCtrl() && !io.KeyAlt && !io.KeyShift;
     auto key = [&](ImGuiKey k) { return !typing && modifiers && ImGui::IsKeyDown(k); };
     const std::pair<bool, int> buttons[] = {
@@ -1626,7 +1715,7 @@ void App::Rotate(const Device &device) {
 // that has focus in iOS (worker.h, "type").
 void App::SendKeys(Session &session) {
     const ImGuiIO &io = ImGui::GetIO();
-    if (settings_.keyboard != KeyboardMode::Typing || io.WantTextInput || editorPopup_)
+    if (settings_.keyboard != KeyboardMode::Typing || io.WantTextInput || editorPopup_ || AnyPopupOpen() || session.saving)
         return;
     std::wstring text;
     for (ImWchar c : io.InputQueueCharacters)
@@ -1644,19 +1733,28 @@ void App::SendKeys(Session &session) {
     }
 }
 
-// The toolbar under the device: Rotate, Pause, Screenshot, Record, Fullscreen | Sound, Internet, Web
-// proxy | Stop. Under it is the keyboard's row: its mode, Edit controls, and the box for typing into
-// iOS (or, in the editor, the buttons that add controls). The hardware buttons are on the device itself.
+// The width of the toolbar's row: its buttons, in four groups with a gap between them.
+float App::ToolbarWidth(const Session &session) const {
+    const ImGuiStyle &style = ImGui::GetStyle();
+    const char *names[] = {"Rotate", session.paused ? "Resume" : "Pause", "Screenshot", "Record", "Fullscreen", "Save state",
+                           "Load state", "Sound", "Internet", "Web proxy", "Stop"};
+    float width = style.ItemSpacing.x * 2 * 3 + style.ItemSpacing.x * 7;
+    for (const char *name : names)
+        width += IconButtonWidth(name);
+    return width;
+}
+
+// The toolbar under the device: Rotate, Pause, Screenshot, Record, Fullscreen | Save state, Load state
+// | Sound, Internet, Web proxy | Stop. Under it is the keyboard's row: its mode, Edit controls, and the
+// box for typing into iOS (or, in the editor, the buttons that add controls). The hardware buttons are
+// on the device itself.
 void App::Controls(Session &session) {
-    const bool ready = session.state == "running" || session.state == "paused";
+    const bool ready = (session.state == "running" || session.state == "paused") && !session.saving;
     const ImGuiStyle &style = ImGui::GetStyle();
     const float gap = style.ItemSpacing.x * 2;   // between the groups
     const char *mark = "(!)";
-    const char *names[] = {"Rotate", session.paused ? "Resume" : "Pause", "Screenshot", "Record", "Fullscreen", "Sound",
-                           "Internet", "Web proxy", "Stop"};
-    float width = gap * 2 + style.ItemSpacing.x * 6;
-    for (const char *name : names)
-        width += IconButtonWidth(name);
+    const char *pauseName = session.paused ? "Resume" : "Pause";
+    float width = ToolbarWidth(session);
     if (session.proxyError)
         width += ImGui::CalcTextSize(mark).x + style.ItemSpacing.x;
     CenterRow(width);
@@ -1670,8 +1768,7 @@ void App::Controls(Session &session) {
         Rotate(session.GetDevice());
     ImGui::SameLine();
     ImGui::BeginDisabled(!ready);
-    if (IconButton(session.paused ? icon::kPlay : icon::kPause, names[1], session.paused ? "Resume" : "Pause",
-                   session.paused)) {
+    if (IconButton(session.paused ? icon::kPlay : icon::kPause, pauseName, pauseName, session.paused)) {
         session.paused = !session.paused;   // at once: no finger may start once the engine has stopped
         session.Send({{"cmd", "pause"}, {"paused", session.paused}});
     }
@@ -1688,6 +1785,19 @@ void App::Controls(Session &session) {
     ImGui::SameLine();
     if (IconButton(icon::kFullscreen, "Fullscreen", "Only the screen, on the whole monitor (F11). F11 or Esc leaves it."))
         EnterFullscreen();
+
+    ImGui::SameLine(0, gap);
+    ImGui::BeginDisabled(!ready);
+    if (IconButton(icon::kSave, "Save state",
+                   "Save the device as it is now, to carry on from there later. " + settings_.Shortcut("F5") +
+                       " saves over the quick save."))
+        ImGui::OpenPopup("Save state");
+    ImGui::EndDisabled();
+    SaveStatePopup(session);
+    ImGui::SameLine();
+    if (IconButton(icon::kLoad, "Load state",
+                   "Carry on from a saved state. " + settings_.Shortcut("F9") + " loads the quick save."))
+        OpenSlots(session.GetDevice());
 
     ImGui::SameLine(0, gap);
     if (IconButton(session.muted ? icon::kMute : icon::kVolume, "Sound", session.muted ? "Sound is off" : "Sound is on",
@@ -2073,6 +2183,7 @@ void App::SettingsPage() {
         ImGui::BulletText("H: Home, P: Sleep/Wake, + and -: volume, R: rotate, arrow keys: tilt.");
         ImGui::BulletText("Type text into iOS with the box under the device.");
     }
+    ImGui::BulletText("%s", (settings_.Shortcut("F5") + ": quick save. " + settings_.Shortcut("F9") + ": quick load.").c_str());
     ImGui::BulletText("F2: Controls mode on and off. F11: fullscreen. F11 or Esc leaves it.");
     ImGui::Spacing();
     DimText("FOLDERS");
@@ -2836,6 +2947,423 @@ void App::ForceOffOverlay() {
     }
 }
 
+// ---- Save states -----------------------------------------------------------------------------
+
+std::string SlotLabel(const std::string &name) { return name == kQuickSlot ? "Quick save" : name; }
+
+// ImGui centres a modal only the first time, and the window may have gone fullscreen since.
+void CenterNextPopup() {
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+}
+
+// When a slot was saved, in this computer's time: "2026-11-04 14:03".
+std::string SlotTime(int64_t savedAt) {
+    const std::time_t time = std::time_t(savedAt);
+    std::tm local{};
+    char text[32] = "";
+    if (localtime_s(&local, &time) == 0)
+        std::strftime(text, sizeof text, "%Y-%m-%d %H:%M", &local);
+    return text;
+}
+
+// F5 saves the device on screen over its quick save, and F9 loads that. They follow the hardware
+// shortcuts' rule: they take Ctrl while the keys do something else (Typing and Controls modes).
+void App::SaveStateKeys(Device *device, Session *session) {
+    const ImGuiIO &io = ImGui::GetIO();
+    if (!device || closing_ || io.WantTextInput || editorPopup_ || AnyPopupOpen() ||
+        io.KeyCtrl != settings_.ShortcutsTakeCtrl() || io.KeyAlt || io.KeyShift)
+        return;
+    if (session && ImGui::IsKeyPressed(ImGuiKey_F5, false))
+        SaveSlot(*session, kQuickSlot);
+    if (ImGui::IsKeyPressed(ImGuiKey_F9, false)) {
+        if (fs::exists(device->Snapshot(kQuickSlot)))
+            AskLoad(*device, kQuickSlot);
+        else
+            ShowToast("There's no quick save yet");
+    }
+}
+
+// Saves the running device to a slot. The guest stands still until the worker answers (Toast shows
+// "Saving…"), and the slot it replaces stays whole until the new one is complete.
+void App::SaveSlot(Session &session, const std::string &name) {
+    if ((session.state != "running" && session.state != "paused") || session.saving)
+        return;
+    const Device &device = session.GetDevice();
+    session.saving = true;
+    session.Request({{"cmd", "snapshot.save"}, {"name", name}, {"landscape", OrientationOf(device) == Orientation::Landscape}},
+                    [this, id = device.id, deviceName = device.name, name](const Json &reply) {
+                        const auto found = sessions_.find(id);
+                        if (found != sessions_.end())
+                            found->second->saving = false;
+                        if (reply.value("ok", false))
+                            ShowToast("Saved: " + SlotLabel(name));
+                        else
+                            error_ = "Couldn't save " + deviceName + ": " + reply.value("error", "it failed.");
+                    });
+}
+
+// The Save state button's popup: the quick save, or a new named slot.
+void App::SaveStatePopup(Session &session) {
+    if (!ImGui::BeginPopup("Save state"))
+        return;
+    if (ImGui::Button("Quick save", ImVec2(ImGui::GetFontSize() * 16, 0))) {
+        SaveSlot(session, kQuickSlot);
+        ImGui::CloseCurrentPopup();
+    }
+    Tooltip(("Saves over the last quick save (" + settings_.Shortcut("F5") + ").").c_str());
+    if (ImGui::IsWindowAppearing())
+        ImGui::SetKeyboardFocusHere();
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16);
+    bool done = ImGui::InputTextWithHint("##name", "Name a new save state", &slotName_, ImGuiInputTextFlags_EnterReturnsTrue);
+    const bool valid = ValidSlotName(slotName_);
+    const bool exists = valid && fs::exists(session.GetDevice().Snapshot(slotName_));
+    done |= Button(exists ? "Replace" : "Save", valid);
+    if (done && valid) {
+        SaveSlot(session, slotName_);
+        slotName_.clear();
+        ImGui::CloseCurrentPopup();
+    }
+    if (exists) {
+        ImGui::SameLine();
+        DimText("One already has this name");
+    }
+    ImGui::EndPopup();
+}
+
+void App::OpenSlots(const Device &device) {
+    slotsFor_ = device.id;
+    slots_ = ListSaveStates(device);
+    renamingSlot_.clear();
+}
+
+void App::CloseSlots() {
+    slotsFor_.clear();
+    slots_.clear();
+    for (auto &[key, texture] : slotPictures_)
+        texture.Release();
+    slotPictures_.clear();
+}
+
+// A slot's thumbnail, read the first time it's shown. Its id is 0 if it has none.
+const Texture &App::SlotPicture(const SaveState &slot) {
+    const std::string key = slot.name + "/" + std::to_string(slot.savedAt);
+    const auto found = slotPictures_.find(key);
+    if (found != slotPictures_.end())
+        return found->second;
+    Texture &texture = slotPictures_[key];
+    std::vector<uint8_t> pixels;
+    int width = 0, height = 0;
+    if (ReadPng(slot.Thumbnail(), pixels, width, height))
+        texture.Upload(pixels, width, height, true);
+    return texture;
+}
+
+// One slot in the list: its picture, what it is, and Load, Rename and Delete. `changed` asks for the
+// list to be read again.
+void App::SlotRow(const Device &device, const SaveState &slot, bool &changed) {
+    ImGui::PushID(slot.name.c_str());
+    const float box = ImGui::GetFontSize() * 6.5f;
+    const ImVec2 at = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2(box, box));
+    ImDrawList *draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(at, ImVec2(at.x + box, at.y + box), IM_COL32(22, 24, 28, 255), 4);
+    const Texture &picture = SlotPicture(slot);
+    if (picture.id) {
+        const bool turned = picture.width > picture.height;
+        const ImVec2 upright = turned ? ImVec2(float(picture.height), float(picture.width))
+                                      : ImVec2(float(picture.width), float(picture.height));
+        const ImVec2 shown = slot.landscape ? ImVec2(upright.y, upright.x) : upright;
+        ImVec2 min, max;
+        FitRect(at, ImVec2(box, box), shown.x / shown.y, min, max);
+        DrawPanel(draw, picture, min, ImVec2(max.x - min.x, max.y - min.y),
+                  slot.landscape ? Orientation::Landscape : Orientation::Portrait, turned);
+    }
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    if (renamingSlot_ == slot.name) {
+        ImGui::SetKeyboardFocusHere();
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14);
+        const bool done = ImGui::InputText("##rename", &slotName_, ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::SameLine();
+        if (ImGui::Button("Save") || done) {
+            try {
+                if (slotName_ != slot.name)
+                    RenameSaveState(slot, slotName_);
+                renamingSlot_.clear();
+                changed = true;
+            } catch (const std::exception &e) {
+                error_ = e.what();
+                renamingSlot_.clear();
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+            renamingSlot_.clear();
+    } else {
+        FontText(g_titleFont, SlotLabel(slot.name));
+    }
+    DimText(SlotTime(slot.savedAt) + "   " + FormatBytes(slot.bytes) + "   " + (slot.landscape ? "Landscape" : "Portrait"));
+    const bool compatible = slot.engine == EngineVersion();
+    if (!compatible)
+        ImGui::TextColored(kWarn, "Made by another version of the engine: it can't be loaded.");
+
+    const Session *session = SessionFor(device);
+    const bool busy = session && (session->saving || session->state == "loading");
+    const bool recording = session && session->recording;
+    if (Button("Load", compatible && !busy && !recording))
+        AskLoad(device, slot.name);
+    if (recording)
+        Tooltip("Stop the recording first: loading a save state would lose it.");
+    ImGui::SameLine();
+    if (Button("Rename", !busy && renamingSlot_.empty())) {
+        renamingSlot_ = slot.name;
+        slotName_ = slot.name;
+    }
+    ImGui::SameLine();
+    if (Button("Delete", !busy))
+        ImGui::OpenPopup("delete");
+    if (ImGui::BeginPopup("delete")) {
+        ImGui::Text("Delete %s?", SlotLabel(slot.name).c_str());
+        if (ImGui::Button("Delete")) {
+            try {
+                DeleteSaveState(slot);
+            } catch (const std::exception &e) {
+                error_ = e.what();
+            }
+            changed = true;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel"))
+            ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    ImGui::EndGroup();
+    ImGui::PopID();
+}
+
+// The list of a device's save states, opened by Load state (or Save states..., while it's stopped).
+void App::SaveStatesPopup() {
+    const auto device = std::find_if(devices_.begin(), devices_.end(), [&](const Device &d) { return d.id == slotsFor_; });
+    if (device == devices_.end()) {
+        CloseSlots();
+        return;
+    }
+    if (!ImGui::IsPopupOpen("Save states"))
+        ImGui::OpenPopup("Save states");
+    const float font = ImGui::GetFontSize();
+    ImGui::SetNextWindowSize(ImVec2(font * 34, font * 36), ImGuiCond_Appearing);
+    CenterNextPopup();
+    if (!ImGui::BeginPopupModal("Save states", nullptr, ImGuiWindowFlags_NoSavedSettings))
+        return;
+    DimText(device->name);
+    ImGui::BeginChild("slots", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - font * 0.5f));
+    bool changed = false;
+    uint64_t total = 0;
+    for (const SaveState &slot : slots_) {
+        SlotRow(*device, slot, changed);
+        ImGui::Separator();
+        total += slot.bytes;
+    }
+    if (slots_.empty()) {
+        ImGui::Dummy(ImVec2(0, font));
+        ImGui::TextWrapped("No save states yet. While the device runs, the toolbar's Save state button or %s saves one.",
+                           settings_.Shortcut("F5").c_str());
+    }
+    ImGui::EndChild();
+    if (changed)
+        slots_ = ListSaveStates(*device);
+    DimText(std::to_string(slots_.size()) + (slots_.size() == 1 ? " save state, " : " save states, ") + FormatBytes(total));
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - ButtonWidth("Close"));
+    // Esc belongs to whatever is open inside the list, first.
+    const bool canEscape = renamingSlot_.empty() && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
+    bool closed = ImGui::Button("Close") || (canEscape && ImGui::IsKeyPressed(ImGuiKey_Escape, false));
+    ConfirmLoadPopup();
+    if (slotsFor_.empty()) {   // the load went ahead
+        closed = false;
+        ImGui::CloseCurrentPopup();
+    }
+    if (closed) {
+        ImGui::CloseCurrentPopup();
+        CloseSlots();
+    }
+    ImGui::EndPopup();
+}
+
+// Asks before a load, unless this slot can't be loaded, which it says instead. A load has to end the
+// session, so what can't go ahead is turned down here, while there's still a session to keep.
+void App::AskLoad(const Device &device, const std::string &name) {
+    const Session *session = SessionFor(device);
+    if (session && (session->saving || session->state == "loading"))
+        return;
+    try {
+        if (session && session->recording)
+            throw std::runtime_error("Stop the recording first: loading a save state would lose it.");
+        SaveState slot = ReadSaveState(device.Snapshot(name));
+        CheckSaveState(slot);
+        askLoad_ = std::move(slot);
+        askLoadDevice_ = device.id;
+    } catch (const std::exception &e) {
+        error_ = device.name + ": " + e.what();
+        if (fullscreen_)
+            ShowToast(e.what());
+    }
+}
+
+// "Your current progress will be lost": Enter or Load go ahead, Esc or Cancel don't.
+void App::ConfirmLoadPopup() {
+    if (askLoad_.name.empty())
+        return;
+    if (!ImGui::IsPopupOpen("Load state"))
+        ImGui::OpenPopup("Load state");
+    CenterNextPopup();
+    if (!ImGui::BeginPopupModal("Load state", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
+        return;
+    ImGui::Text("Load %s, saved %s?", SlotLabel(askLoad_.name).c_str(), SlotTime(askLoad_.savedAt).c_str());
+    DimText("Your current progress will be lost.");
+    const bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false);
+    const bool load = ImGui::Button("Load") || enter;
+    ImGui::SameLine();
+    const bool cancel = ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+    if (load || cancel) {
+        const SaveState slot = std::move(askLoad_);
+        askLoad_ = {};
+        ImGui::CloseCurrentPopup();
+        if (load) {
+            CloseSlots();
+            for (const Device &device : devices_)
+                if (device.id == askLoadDevice_)
+                    LoadSlot(device, slot);
+        }
+    }
+    ImGui::EndPopup();
+}
+
+// Replaces the device's state with a slot's. The engine can only restore as it starts, so a running
+// worker ends at once, without shutting iOS down (the state it would keep is being replaced). The new
+// worker copies the slot and restores it. Internet, the proxy and sound stay as they are now.
+void App::LoadSlot(const Device &device, const SaveState &slot) {
+    SessionOptions options = NewSessionOptions();
+    options.loadState = slot.folder;
+    if (Session *running = SessionFor(device)) {
+        options.internet = running->internet;
+        options.webProxy = running->webProxy;
+        options.muted = running->muted;
+        if (heldDevice_ == device.id)
+            ReleaseHeldInput();
+        sessions_.erase(device.id);
+        textures_[device.id].Release();
+        textures_.erase(device.id);
+        keymaps_.erase(device.id);
+    }
+    devPanels_.erase(device.id);   // its requests went with the worker
+    interrupted_.erase(device.id);
+    if (slot.landscape)
+        orientations_[device.id] = Orientation::Landscape;
+    else
+        orientations_.erase(device.id);
+    Launch(device, options);
+}
+
+// A load was cut short, so the device's storage is incomplete and it can't start. Offers the way out.
+void App::InterruptedLoadPopup() {
+    const Device *device = nullptr;
+    std::string name;
+    for (auto it = interrupted_.begin(); it != interrupted_.end() && !device;) {
+        const auto found = std::find_if(devices_.begin(), devices_.end(), [&](const Device &d) { return d.id == *it; });
+        if (found != devices_.end())
+            name = InterruptedLoad(*found);
+        if (found == devices_.end() || name.empty()) {
+            it = interrupted_.erase(it);
+        } else if (SessionFor(*found)) {
+            ++it;   // being loaded now
+        } else {
+            device = &*found;
+        }
+    }
+    if (!device)
+        return;
+    if (!ImGui::IsPopupOpen("Load interrupted"))
+        ImGui::OpenPopup("Load interrupted");
+    CenterNextPopup();
+    if (!ImGui::BeginPopupModal("Load interrupted", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
+        return;
+    ImGui::Text("Loading %s on %s didn't finish.", SlotLabel(name).c_str(), device->name.c_str());
+    DimText("Its storage was only partly copied, so it can't start until it's loaded again or erased.");
+    DimText("Erasing also deletes this device's save states.");
+    bool usable = false;
+    SaveState slot;
+    try {
+        slot = ReadSaveState(device->Snapshot(name));
+        CheckSaveState(slot);
+        usable = true;
+    } catch (const std::exception &) {
+        // the slot went, or an engine update left it behind: only Erase is left
+    }
+    if (Button(("Load " + SlotLabel(name) + " again").c_str(), usable)) {
+        ImGui::CloseCurrentPopup();
+        LoadSlot(*device, slot);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Erase")) {
+        try {
+            EraseDevice(*device);
+            notice_ = device->name + " was erased.";
+        } catch (const std::exception &e) {
+            error_ = e.what();
+        }
+        interrupted_.erase(device->id);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Later")) {
+        interrupted_.erase(device->id);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+// The save-state popups that can stand alone. Frame calls this while nothing else asks for attention.
+void App::SaveStateOverlays() {
+    if (!slotsFor_.empty())
+        SaveStatesPopup();
+    else if (!askLoad_.name.empty())
+        ConfirmLoadPopup();
+    else
+        InterruptedLoadPopup();
+}
+
+void App::ShowToast(const std::string &text) {
+    toast_ = text;
+    toastUntil_ = ImGui::GetTime() + 3;
+}
+
+// A short message at the top of the window, over everything, so it shows in fullscreen too and moves
+// nothing: "Saving…" and "Loading…" while they last, then the last toast for a few seconds.
+void App::Toast() {
+    const Device *device = page_ == Page::Device ? Selected() : nullptr;
+    const Session *session = device ? SessionFor(*device) : nullptr;
+    std::string text;
+    if (session && session->saving)
+        text = "Saving…";
+    else if (session && session->state == "loading")
+        text = "Loading…";
+    else if (ImGui::GetTime() < toastUntil_)
+        text = toast_;
+    if (text.empty())
+        return;
+    animating_ = true;   // so it goes away on time with nothing else on screen moving
+    const ImGuiViewport *viewport = ImGui::GetMainViewport();
+    const ImVec2 size = ImGui::CalcTextSize(text.c_str());
+    const float padX = ImGui::GetFontSize(), padY = ImGui::GetFontSize() * 0.5f;
+    const ImVec2 min(viewport->Pos.x + (viewport->Size.x - size.x) / 2 - padX, viewport->Pos.y + ImGui::GetFontSize());
+    const ImVec2 max(min.x + size.x + padX * 2, min.y + size.y + padY * 2);
+    ImDrawList *draw = ImGui::GetForegroundDrawList();
+    draw->AddRectFilled(min, max, IM_COL32(18, 18, 20, 235), (max.y - min.y) / 2);
+    draw->AddText(ImVec2(min.x + padX, min.y + padY), IM_COL32(240, 240, 240, 255), text.c_str());
+}
+
 // ---- Window and OpenGL -----------------------------------------------------------------------
 
 // For testing the UI where nobody watches the screen: IOS_EMULATOR_UI_START=1 starts the selected
@@ -2846,6 +3374,8 @@ void App::ForceOffOverlay() {
 // that device's versions), IOS_EMULATOR_UI_DROP=<file> drops that file on the window after
 // IOS_EMULATOR_UI_DROP_AFTER seconds (default 1), and IOS_EMULATOR_UI_SHOT=<file.png> saves the
 // window after IOS_EMULATOR_UI_SHOT_AFTER seconds (default 5) and closes the app.
+// IOS_EMULATOR_UI_SLOTS=1 opens the selected device's save states, IOS_EMULATOR_UI_SAVE_AFTER=<s>
+// quick saves after that many seconds, and IOS_EMULATOR_UI_ASK_LOAD_AFTER=<s> does what F9 does.
 std::string EnvText(const char *name) {
     const char *value = getenv(name);
     return value ? value : "";
@@ -3005,7 +3535,8 @@ int RunUi() {
     // and Segoe UI Semibold for titles.
     const fs::path fonts = "C:\\Windows\\Fonts";
     if (fs::exists(fonts / "segoeui.ttf")) {
-        io.Fonts->AddFontFromFileTTF(PathText(fonts / "segoeui.ttf").c_str(), 17.0f * scale);
+        static const ImWchar text[] = {0x0020, 0x00FF, 0x2026, 0x2026, 0};   // Latin, and the ellipsis
+        io.Fonts->AddFontFromFileTTF(PathText(fonts / "segoeui.ttf").c_str(), 17.0f * scale, nullptr, text);
         if (fs::exists(fonts / "segmdl2.ttf")) {
             static const ImWchar icons[] = {0xE700, 0xE9FF, 0};
             ImFontConfig merge;
@@ -3045,7 +3576,10 @@ int RunUi() {
             app.ShowDevTools(true);
         if (EnvText("IOS_EMULATOR_UI_EDITOR") == "1")
             app.ShowEditor();
-        bool shotTaken = false, fullscreen = false;
+        if (EnvText("IOS_EMULATOR_UI_SLOTS") == "1")
+            app.ShowSaveStates();
+        const std::string saveAfter = EnvText("IOS_EMULATOR_UI_SAVE_AFTER"), askLoadAfter = EnvText("IOS_EMULATOR_UI_ASK_LOAD_AFTER");
+        bool shotTaken = false, fullscreen = false, saved = saveAfter.empty(), asked = askLoadAfter.empty();
         while (!app.Finished()) {
             // Idle politely: with no device running, wait for input (or a periodic refresh).
             if (!app.Busy())
@@ -3068,6 +3602,14 @@ int RunUi() {
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
+            if (!saved && (NowNs() - started) / 1e9 > atof(saveAfter.c_str())) {
+                app.QuickSave();
+                saved = true;
+            }
+            if (!asked && (NowNs() - started) / 1e9 > atof(askLoadAfter.c_str())) {
+                app.AskQuickLoad();
+                asked = true;
+            }
             app.Frame();
             if (app.Fullscreen() != fullscreen) {
                 fullscreen = app.Fullscreen();

@@ -14,6 +14,8 @@ Session::Session(const Device &device, const SessionOptions &options) : device_(
     muted = options.muted;
     internet = options.internet;
     webProxy = options.webProxy;
+    if (!options.loadState.empty())
+        state = "loading";
     StartUsbmuxd();
     try {
         StartWorker(options);
@@ -136,6 +138,8 @@ void Session::StartWorker(const SessionOptions &options) {
         throwawayState_ = fs::temp_directory_path() / ("ios-emulator-" + device_.id.substr(0, 8) + "-" + RandomHex(4));
         launch.args.insert(launch.args.end(),
                            {L"--snapshot", options.snapshot.wstring(), L"--state", throwawayState_.wstring()});
+    } else if (!options.loadState.empty()) {
+        launch.args.insert(launch.args.end(), {L"--load-state", options.loadState.wstring()});
     }
     if (options.saveSnapshots)
         launch.args.push_back(L"--save-snapshots");

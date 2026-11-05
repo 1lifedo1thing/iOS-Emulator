@@ -154,6 +154,8 @@ void EraseDevice(const Device &device) {
     // The state folder holds every change the device made; the base stays as prepared.
     fs::remove_all(device.State());
     fs::create_directories(device.State());
+    fs::remove_all(device.dir / "snapshots");
+    fs::remove(device.LoadMarker());
 }
 
 void DeleteDevice(const Device &device) { fs::remove_all(device.dir); }

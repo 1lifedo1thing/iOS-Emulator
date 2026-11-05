@@ -22,6 +22,7 @@ struct SessionOptions {
     bool headphones = false;
     bool muted = false;
     fs::path snapshot;        // start from this snapshot folder instead of booting (a throwaway run, snapshot.h)
+    fs::path loadState;       // ...or from this save state, replacing what the device has stored
     bool saveSnapshots = false;   // let "snapshot.save" requests save the machine (opens qemu's monitor locally)
 };
 
@@ -52,7 +53,8 @@ public:
     int FrameHeight() const { return frameHeight_; }
 
     // What the worker last reported.
-    std::string state = "starting";   // starting, running, paused, stopping, stopped
+    std::string state = "starting";   // starting, loading, running, paused, stopping, stopped
+    bool saving = false;              // a save state is being written; the UI sets this (the guest is stopped)
     bool sleeping = false;            // iOS turned the display off
     int agent = 0;                    // guest tools: 0 not running, 1 alive, 2 not answering
     int screenWidth = 320, screenHeight = 480;

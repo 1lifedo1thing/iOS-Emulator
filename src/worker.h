@@ -45,12 +45,17 @@
 //                                                            text (it_typein); result {views}
 //     {"cmd":"syslog","on":true}                             streams "log" events
 //     {"cmd":"forward","on":true,"port":2222,"devicePort":22}
-//     {"cmd":"snapshot.save","name":"booted"}                saves the machine to <device>\snapshots\<name>\
-//                                                            (snapshot.h); result {path, bytes}; needs --save-snapshots
+//     {"cmd":"snapshot.save","name":"booted","landscape":false}   saves the machine, disk and screen to
+//                                                            <device>\snapshots\<name>\ (snapshot.h); result
+//                                                            {path, bytes}; needs --save-snapshots. Input and
+//                                                            typing do nothing meanwhile: the guest is stopped
 //
 // Started with --snapshot <folder>, the worker restores that snapshot instead of booting, on a
 // throwaway copy of its disk: nothing the guest writes is kept, and "stop" quits at once instead
 // of shutting iOS down.
+//
+// Started with --load-state <folder>, it replaces the device's state\ with that save state's and
+// restores the machine: the run goes on from there like any other, and "stop" shuts iOS down.
 //
 // Events (worker -> UI), each with an "event" field:
 //   board   {machine, width, height, capabilities, maxContacts}   once, before booting
@@ -70,4 +75,5 @@
 //   --device <dir>  --frames <mapping name>  --events <pipe handle>
 //   [--internet] [--web-proxy] [--headphones] [--muted] [--save-snapshots]
 //   [--snapshot <folder> --state <dir>]   restore a snapshot, using <dir> as the throwaway state folder
+//   [--load-state <folder>]               restore a save state over the device's real state folder
 int RunWorker(const std::vector<std::string> &args);

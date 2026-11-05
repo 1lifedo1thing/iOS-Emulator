@@ -7,7 +7,7 @@
 //   iOS-Emulator.exe --run <device> [--seconds N] [--screenshot file.png] [--internet] [--no-web-proxy]
 //                    [--tap x,y,t ...] [--swipe x,y,toX,toY,t[,seconds] ...]
 //                    [--request t json ...] [--send t json ...] [--shot t file.png ...]
-//                    [--save-snapshot t name] [--snapshot name]
+//                    [--save-snapshot t name] [--snapshot name] [--load-state name]
 //                                          boots a device without a window (for testing and scripts);
 //                                          --no-web-proxy lets iOS connect to websites itself (proxy.h);
 //                                          --tap/--swipe touch the screen (coordinates 0..1) t seconds after start;
@@ -17,7 +17,9 @@
 //                                          --shot saves the screen t seconds after start;
 //                                          --save-snapshot saves the machine t seconds after start;
 //                                          --snapshot starts from a saved machine instead of booting,
-//                                          on a throwaway copy of its disk (worker.h), in seconds
+//                                          on a throwaway copy of its disk (worker.h), in seconds;
+//                                          --load-state does the same over the device's real state,
+//                                          like loading a save state in the window
 //   iOS-Emulator.exe --catalog [product]   lists the firmwares that can be prepared
 //   iOS-Emulator.exe --prepare <firmware id> [--name N] [--jailbreak] [--ipsw file]
 //                                          prepares a new device (e.g. --prepare n18ap-8C148 --jailbreak)
@@ -27,6 +29,7 @@
 #include "firmware.h"
 #include "library.h"
 #include "session.h"
+#include "snapshot.h"
 #include "ui.h"
 #include "worker.h"
 
@@ -79,7 +82,7 @@ static int RunCommand(const std::vector<std::string> &args) {
         double at;
         std::string file;
     };
-    std::string name, screenshot, typingProblem, snapshot, progress;
+    std::string name, screenshot, typingProblem, snapshot, loadState, progress;
     std::vector<Gesture> gestures;
     std::vector<Command> commands;
     std::vector<Shot> shots;
@@ -105,6 +108,8 @@ static int RunCommand(const std::vector<std::string> &args) {
             options.saveSnapshots = true;
         } else if (args[i] == "--snapshot" && i + 1 < args.size())
             snapshot = args[++i];
+        else if (args[i] == "--load-state" && i + 1 < args.size())
+            loadState = args[++i];
         else if (args[i] == "--seconds" && i + 1 < args.size())
             seconds = std::stoi(args[++i]);
         else if (args[i] == "--screenshot" && i + 1 < args.size())
@@ -122,8 +127,15 @@ static int RunCommand(const std::vector<std::string> &args) {
         if (!fs::exists(options.snapshot / "machine.state"))
             throw std::runtime_error("No snapshot " + snapshot + " for " + device.name);
     }
-    Print((snapshot.empty() ? "Starting " : "Restoring " + snapshot + " on ") + device.name + " (" +
-          device.Product() + ", iOS " + device.Version() + ")");
+    if (!loadState.empty()) {
+        if (!snapshot.empty())
+            throw std::runtime_error("--snapshot and --load-state can't be used together");
+        options.loadState = device.Snapshot(loadState);
+        CheckSaveState(ReadSaveState(options.loadState));
+    }
+    const std::string from = !snapshot.empty() ? snapshot : loadState;
+    Print((from.empty() ? "Starting " : "Restoring " + from + " on ") + device.name + " (" + device.Product() +
+          ", iOS " + device.Version() + ")");
     Session session(device, options);
     std::string lastState;
     const auto start = std::chrono::steady_clock::now();
@@ -290,7 +302,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             return 0;
         }
         Print("usage: iOS-Emulator [--list | --run <device> [--seconds N] [--screenshot F] [--internet] [--no-web-proxy] "
-              "[--save-snapshot T NAME] [--snapshot NAME] | "
+              "[--save-snapshot T NAME] [--snapshot NAME] [--load-state NAME] | "
               "--catalog | --prepare <firmware> [--jailbreak] | --import <folder>]");
         return 64;
     } catch (const std::exception &e) {

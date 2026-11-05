@@ -2,14 +2,16 @@
 
 #include <winsock2.h>
 
+#include <algorithm>
+#include <ctime>
 #include <fstream>
 #include <thread>
 
 #pragma comment(lib, "ws2_32.lib")
 
-namespace {
-
 using namespace std::chrono_literals;
+
+namespace {
 
 // ---- Local TCP -------------------------------------------------------------------------------
 
@@ -81,55 +83,35 @@ void SendAll(SOCKET s, const char *data, size_t size) {
     }
 }
 
-// ---- qemu's monitor (QMP) --------------------------------------------------------------------
+// ---- What a save writes ----------------------------------------------------------------------
 
-// One JSON object per line. A command is answered with "return" or "error"; "event" lines can
-// come in between and are skipped.
-class Monitor {
-public:
-    explicit Monitor(int port) : socket_(Connect(port, 5s)) {
-        SetTimeout(socket_.s, 5 * 60000);   // it may not answer while qemu sends a large machine
-        ReadLine();   // the greeting
-        Execute("qmp_capabilities");
-    }
+constexpr int kThumbnailSide = 240;   // pixels, along the screen's long side
 
-    Json Execute(const std::string &command, const Json &arguments = nullptr) {
-        Json request = {{"execute", command}};
-        if (!arguments.is_null())
-            request["arguments"] = arguments;
-        const std::string line = request.dump() + "\r\n";
-        SendAll(socket_.s, line.data(), line.size());
-        for (;;) {
-            Json reply = Json::parse(ReadLine());
-            if (reply.contains("return"))
-                return reply["return"];
-            if (reply.contains("error"))
-                throw std::runtime_error(command + ": " + reply["error"].value("desc", "failed"));
-        }
-    }
+// The size of a folder's files.
+uint64_t FolderBytes(const fs::path &folder) {
+    uint64_t bytes = 0;
+    for (const auto &entry : fs::recursive_directory_iterator(folder))
+        if (entry.is_regular_file())
+            bytes += entry.file_size();
+    return bytes;
+}
 
-private:
-    std::string ReadLine() {
-        for (;;) {
-            const size_t end = pending_.find('\n');
-            if (end != std::string::npos) {
-                std::string line = pending_.substr(0, end);
-                pending_.erase(0, end + 1);
-                return line;
+// Saves the screen, shrunk by a whole factor: each pixel averages the block it replaces.
+void WriteThumbnail(const ScreenPicture &screen, const fs::path &file) {
+    const int factor = std::max(1, (std::max(screen.width, screen.height) + kThumbnailSide - 1) / kThumbnailSide);
+    const int width = screen.width / factor, height = screen.height / factor;
+    std::vector<uint8_t> small(size_t(width) * height * 4);
+    for (int y = 0; y < height; y++)
+        for (int x = 0; x < width; x++)
+            for (int channel = 0; channel < 4; channel++) {
+                int sum = 0;
+                for (int by = 0; by < factor; by++)
+                    for (int bx = 0; bx < factor; bx++)
+                        sum += screen.bgra[(size_t(y * factor + by) * screen.width + x * factor + bx) * 4 + channel];
+                small[(size_t(y) * width + x) * 4 + channel] = uint8_t(sum / (factor * factor));
             }
-            char buffer[4096];
-            const int n = recv(socket_.s, buffer, sizeof buffer, 0);
-            if (n <= 0)
-                throw std::runtime_error("The engine's monitor stopped answering");
-            pending_.append(buffer, size_t(n));
-        }
-    }
-
-    Socket socket_;
-    std::string pending_;   // bytes read past the last full line
-};
-
-// ---- Saving and restoring --------------------------------------------------------------------
+    WritePng(file, small.data(), width, height);
+}
 
 // Copies a device's state folder, without the serial log and the unclean-shutdown marker.
 void CopyState(const fs::path &from, const fs::path &to) {
@@ -203,24 +185,143 @@ void ReceiveMachine(Monitor &monitor, const fs::path &file) {
 
 }  // namespace
 
+// ---- Save states -----------------------------------------------------------------------------
+
+std::string EngineVersion() {
+    static const std::string version = Sha256File(ResourcesDir() / "libqemu-arm.dll");
+    return version;
+}
+
+SaveState ReadSaveState(const fs::path &folder) {
+    if (!fs::exists(folder / "slot.json") || !fs::exists(folder / "machine.state"))
+        throw std::runtime_error("There's no save state " + PathText(folder.filename()));
+    const Json j = Json::parse(LoadFile(folder / "slot.json"));
+    SaveState slot;
+    slot.name = PathText(folder.filename());
+    slot.folder = folder;
+    slot.savedAt = j.value("savedAt", int64_t(0));
+    slot.landscape = j.value("landscape", false);
+    slot.bytes = j.value("bytes", uint64_t(0));
+    slot.engine = j.value("engine", "");
+    return slot;
+}
+
+std::vector<SaveState> ListSaveStates(const Device &device) {
+    std::vector<SaveState> slots;
+    std::error_code missing;
+    for (const auto &entry : fs::directory_iterator(device.dir / "snapshots", missing)) {
+        if (entry.path().extension() == ".saving")
+            continue;   // a save that never finished
+        try {
+            slots.push_back(ReadSaveState(entry.path()));
+        } catch (const std::exception &) {
+            // a snapshot from before slots: --snapshot still runs it, but its engine isn't known
+        }
+    }
+    std::sort(slots.begin(), slots.end(), [](const SaveState &a, const SaveState &b) {
+        if ((a.name == kQuickSlot) != (b.name == kQuickSlot))
+            return a.name == kQuickSlot;
+        return a.savedAt > b.savedAt;
+    });
+    return slots;
+}
+
+void CheckSaveState(const SaveState &slot) {
+    if (slot.engine != EngineVersion())
+        throw std::runtime_error("This save state was made by another version of the emulator's engine, and this "
+                                 "one can't load it.");
+}
+
+bool ValidSlotName(const std::string &name) {
+    if (name.find_first_not_of(" .") == std::string::npos)
+        return false;
+    const bool badEnd = name.back() == '.' || name.back() == ' ';   // Windows drops these
+    return !badEnd && name.find_first_of("\\/:*?\"<>|") == std::string::npos && name.find("..") == std::string::npos &&
+           fs::path(Widen(name)).extension() != ".saving";
+}
+
+void RenameSaveState(const SaveState &slot, const std::string &name) {
+    if (!ValidSlotName(name))
+        throw std::runtime_error("Not a valid save state name: " + name);
+    const fs::path target = slot.folder.parent_path() / Widen(name);
+    if (fs::exists(target))
+        throw std::runtime_error("There's already a save state called " + name);
+    fs::rename(slot.folder, target);
+}
+
+void DeleteSaveState(const SaveState &slot) { fs::remove_all(slot.folder); }
+
+// ---- qemu's monitor (QMP) --------------------------------------------------------------------
+
+// One JSON object per line. A command is answered with "return" or "error"; "event" lines can
+// come in between and are skipped.
+Monitor::Monitor(int port) : socket_(Connect(port, 30s)) {
+    SetTimeout(socket_, 5 * 60000);   // it may not answer while qemu sends a large machine
+    ReadLine();                       // the greeting
+    Execute("qmp_capabilities");
+}
+
+Monitor::~Monitor() { closesocket(socket_); }
+
+Json Monitor::Execute(const std::string &command, const Json &arguments) {
+    Json request = {{"execute", command}};
+    if (!arguments.is_null())
+        request["arguments"] = arguments;
+    const std::string line = request.dump() + "\r\n";
+    SendAll(socket_, line.data(), line.size());
+    for (;;) {
+        Json reply = Json::parse(ReadLine());
+        if (reply.contains("return"))
+            return reply["return"];
+        if (reply.contains("error"))
+            throw std::runtime_error(command + ": " + reply["error"].value("desc", "failed"));
+    }
+}
+
+std::string Monitor::ReadLine() {
+    for (;;) {
+        const size_t end = pending_.find('\n');
+        if (end != std::string::npos) {
+            std::string line = pending_.substr(0, end);
+            pending_.erase(0, end + 1);
+            return line;
+        }
+        char buffer[4096];
+        const int n = recv(socket_, buffer, sizeof buffer, 0);
+        if (n <= 0)
+            throw std::runtime_error("The engine's monitor stopped answering");
+        pending_.append(buffer, size_t(n));
+    }
+}
+
 std::vector<std::string> MonitorArgs(int &port) {
     { Socket probe(Listen(port)); }   // a port that is free now; the engine listens on it
     return {"-qmp", "tcp:127.0.0.1:" + std::to_string(port) + ",server=on,wait=off", "-global",
             "migration.store-global-state=off"};
 }
 
-void SaveSnapshot(int monitorPort, const fs::path &stateDir, const fs::path &folder) {
+// ---- Saving and restoring --------------------------------------------------------------------
+
+void SaveSnapshot(Monitor &monitor, const fs::path &stateDir, const fs::path &folder, const ScreenPicture &screen,
+                  bool landscape) {
     fs::path saving = folder;
     saving += ".saving";
     fs::remove_all(saving);
     fs::create_directories(saving);
+    const std::string engine = EngineVersion();   // hashing takes a moment: not with the guest stopped
 
-    Monitor monitor(monitorPort);
     monitor.Execute("stop");
     std::string problem;
     try {
         ReceiveMachine(monitor, saving / "machine.state");
         CopyState(stateDir, saving / "state");   // the guest is still stopped: the disk matches
+        if (screen.width > 0)
+            WriteThumbnail(screen, saving / "thumbnail.png");
+        const Json slot = {{"savedAt", int64_t(std::time(nullptr))},
+                           {"landscape", landscape},
+                           {"bytes", FolderBytes(saving)},
+                           {"engine", engine}};
+        SaveFile(saving / "slot.json", slot.dump(2));
     } catch (const std::exception &e) {
         problem = e.what();
     }
@@ -230,8 +331,14 @@ void SaveSnapshot(int monitorPort, const fs::path &stateDir, const fs::path &fol
         fs::remove_all(saving, ignored);
         throw std::runtime_error(problem);
     }
-    fs::remove_all(folder);
+    // The new slot takes over in one step. If the old one can't move, it's still whole.
+    fs::path replaced = folder;
+    replaced += ".old.saving";
+    fs::remove_all(replaced);
+    if (fs::exists(folder))
+        fs::rename(folder, replaced);
     fs::rename(saving, folder);
+    fs::remove_all(replaced);
 }
 
 std::vector<std::string> RestoreSnapshot(const fs::path &folder, const fs::path &stateDir) {
@@ -242,10 +349,12 @@ std::vector<std::string> RestoreSnapshot(const fs::path &folder, const fs::path 
     std::thread([port, file = folder / "machine.state"] {
         try {
             Socket engine(Connect(port, 120s));
-            std::ifstream in(file, std::ios::binary);
-            std::vector<char> buffer(1 << 20);
-            while (in.read(buffer.data(), std::streamsize(buffer.size())) || in.gcount() > 0)
-                SendAll(engine.s, buffer.data(), size_t(in.gcount()));
+            {   // closed before waiting, as the engine may not hang up: the slot must stay replaceable
+                std::ifstream in(file, std::ios::binary);
+                std::vector<char> buffer(1 << 20);
+                while (in.read(buffer.data(), std::streamsize(buffer.size())) || in.gcount() > 0)
+                    SendAll(engine.s, buffer.data(), size_t(in.gcount()));
+            }
             shutdown(engine.s, SD_SEND);
             char byte;
             while (recv(engine.s, &byte, 1, 0) > 0) {
@@ -256,4 +365,15 @@ std::vector<std::string> RestoreSnapshot(const fs::path &folder, const fs::path 
         }
     }).detach();
     return {"-incoming", "tcp:127.0.0.1:" + std::to_string(port)};
+}
+
+std::vector<std::string> LoadSaveState(const Device &device, const fs::path &folder) {
+    SaveFile(device.LoadMarker(), PathText(folder.filename()));
+    std::vector<std::string> args = RestoreSnapshot(folder, device.State());
+    fs::remove(device.LoadMarker());
+    return args;
+}
+
+std::string InterruptedLoad(const Device &device) {
+    return fs::exists(device.LoadMarker()) ? LoadFile(device.LoadMarker()) : "";
 }
