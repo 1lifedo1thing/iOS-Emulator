@@ -68,10 +68,11 @@ QemuIosPortableBoard Engine::FindBoard(const std::string &board) const {
 
 // ---- Boot command line -----------------------------------------------------------------------
 
-// The three ways the supported boards start (ported from LightTouch's Portable/src/Storage.cpp):
+// The ways the supported boards start (ported from LightTouch's Portable/src/Storage.cpp):
 //   S5L8900 (iPod touch 1G, original iPhone) and S5L8720 (iPod touch 2G) start from their
-//   SecureROM (the boot ROM file); the A4-era boards start from files firmwarekit prepared.
-enum class Family { S5L8900, S5L8720, A4 };
+//   SecureROM (the boot ROM file); the A4-era boards start from files firmwarekit prepared;
+//   the A5 (iPhone 4S, experimental) too, from a kboot bundle and a PPN NAND page store.
+enum class Family { S5L8900, S5L8720, A4, A5 };
 
 static Family BoardFamily(const std::string &board) {
     if (board == "n45ap" || board == "m68ap")
@@ -80,16 +81,27 @@ static Family BoardFamily(const std::string &board) {
         return Family::S5L8720;
     if (board == "n18ap" || board == "n81ap" || board == "n88ap" || board == "n90ap" || board == "k48ap")
         return Family::A4;
+    if (board == "n94ap")
+        return Family::A5;
     throw std::runtime_error("No boot route for the board " + board);
 }
 
-bool NeedsBootrom(const std::string &board) { return BoardFamily(board) != Family::A4; }
+bool NeedsBootrom(const std::string &board) {
+    const Family family = BoardFamily(board);
+    return family == Family::S5L8900 || family == Family::S5L8720;
+}
+
+bool HasNetwork(const std::string &board) { return BoardFamily(board) != Family::A5; }
+
+bool HasSaveStates(const std::string &board) { return BoardFamily(board) != Family::A5; }
+
+bool Experimental(const std::string &board) { return board == "n94ap"; }
 
 std::vector<std::string> BuildBootArgs(const Device &device, const BootOptions &options) {
     const Json lock = device.Lock();
     const Family family = BoardFamily(device.board);
     const fs::path base = device.Base(), state = device.State();
-    const std::string strategy = lock.value("boot_strategy", family == Family::A4 ? "kboot" : "iboot");
+    const std::string strategy = lock.value("boot_strategy", family == Family::A4 || family == Family::A5 ? "kboot" : "iboot");
     const bool modem = device.board == "n88ap" || device.board == "n90ap";   // the iPhone 3GS and 4
 
     // The device writes into state\: a NAND overlay over the base image, and its own NOR copy.
@@ -97,7 +109,7 @@ std::vector<std::string> BuildBootArgs(const Device &device, const BootOptions &
     if (fs::exists(base / "nor.bin") && !fs::exists(state / "nor.bin"))
         fs::copy_file(base / "nor.bin", state / "nor.bin");
     const fs::path bootrom = device.Assets() / "bootrom.bin";
-    if (family != Family::A4 && !fs::exists(bootrom))
+    if (NeedsBootrom(device.board) && !fs::exists(bootrom))
         throw std::runtime_error("This device needs its boot ROM (assets\\bootrom.bin)");
 
     // -M takes "machine,key=value,...": a comma inside a value is written twice.
@@ -119,6 +131,10 @@ std::vector<std::string> BuildBootArgs(const Device &device, const BootOptions &
         option("nandrw", file(state / "nand"));
         option("gid-blobs", file(base / "gid-blobs.bin"));
         option("wifi", "on");
+    } else if (family == Family::A5) {
+        // The iPhone 4S: the kboot bundle, and the guest's writes in qcow2 files over the base's page store.
+        option("kboot", file(base / "kboot.bin"));
+        option("nand-overlay", file(state / "nand"));
     } else if (family == Family::S5L8900) {
         option("bootrom", file(bootrom));
         option("iboot", file(base / "iBoot.bin"));
@@ -165,6 +181,13 @@ std::vector<std::string> BuildBootArgs(const Device &device, const BootOptions &
         option("headphones", "on");
 
     std::vector<std::string> args = {"iOS-Emulator", "-M", machine};
+    if (family == Family::A5) {
+        // The A5's two cores, each on a host thread. No network: the 4S's Wi-Fi isn't emulated.
+        args.insert(args.end(), {"-smp", "2", "-accel", "tcg,cross-page-chain=on"});
+        args.insert(args.end(), {"-display", "none", "-no-shutdown", "-audio", "driver=none", "-serial",
+                                 "file:" + file(state / "serial.log")});
+        return args;
+    }
     // Wi-Fi through QEMU's user-mode network. restrict=on blocks all traffic; the UI's internet
     // switch flips it live (qemu_ios_ui_net_restrict). lan=off keeps the guest off your LAN.
     std::string netdev = std::string("user,id=wifi0,lan=off,restrict=") + (options.internet ? "off" : "on");

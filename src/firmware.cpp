@@ -25,6 +25,8 @@ std::string Firmware::JailbreakUnavailable() const {
         return "Needs iPhone OS 2.0 or later.";
     if (board == "n72ap")   // Substrate's launchd hook hangs every boot after the first (LightTouch's TODO)
         return "Not on the iPod touch 2G yet: it wouldn't start up again after its first restart.";
+    if (board == "n94ap" && std::atoi(version.c_str()) >= 8)   // firmwarekit's kernel patches stop at iOS 7
+        return "Not on the iPhone 4S with iOS 8 or later yet.";
     return "";
 }
 
@@ -70,7 +72,8 @@ const std::vector<Firmware> &Catalog() {
         }
         // Devices in the order they came out, each one's versions oldest first.
         static const std::vector<std::string> order = {"iPod1,1",   "iPod2,1",   "iPod3,1",   "iPod4,1", "iPhone1,1",
-                                                       "iPhone1,2", "iPhone2,1", "iPhone3,1", "iPad1,1"};
+                                                       "iPhone1,2", "iPhone2,1", "iPhone3,1", "iPhone4,1",
+                                                       "iPad1,1"};
         auto rank = [](const Firmware &f) {
             return std::find(order.begin(), order.end(), f.productType) - order.begin();
         };

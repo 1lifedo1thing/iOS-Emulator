@@ -13,7 +13,7 @@ struct IpaInfo {
 };
 
 // Never fails: what it can't read stays unknown, and installd has the last word. It uses libplist
-// and resources\zlib1.dll, so it runs only in the worker (services.h says why).
+// and resources\libz-1.dll, so it runs only in the worker (services.h says why).
 IpaInfo ReadIpa(const fs::path &ipa);
 
 // Whether `device` ("6.1.6") is older than `minimum` ("12.0"). False when either is unknown.

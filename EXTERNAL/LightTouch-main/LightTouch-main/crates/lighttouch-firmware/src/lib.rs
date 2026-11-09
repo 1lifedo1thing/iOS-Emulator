@@ -60,6 +60,8 @@ pub mod n72_recipe;
 pub mod n72keybag;
 pub mod n72nand;
 pub mod n72nor;
+pub mod n94_recipe;
+pub mod n94nand;
 pub mod nand_disk;
 pub mod oneshot;
 pub mod page_nand;

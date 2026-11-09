@@ -295,7 +295,8 @@ int Worker::Run() {
     options.machine = board.machine;
     options.internet = internet_;
     options.headphones = headphones_;
-    StartWebProxy(options);
+    if (HasNetwork(device_.board))   // the iPhone 4S has no Wi-Fi model: nothing to proxy
+        StartWebProxy(options);
     // Snapshots (snapshot.h): a test run from one works on a throwaway copy of its disk, a load
     // replaces the device's own state\, and both restore the machine instead of booting it. A run
     // that saves gets qemu's monitor, and takes its one connection as soon as the engine is up.
@@ -637,7 +638,7 @@ void Worker::HandleCommand(const Json &command) {
         command.value("paused", false) ? engine_->pause() : engine_->resume();
     } else if (cmd == "mute") {
         muted_ = command.value("muted", false);
-    } else if (cmd == "internet" && ready) {
+    } else if (cmd == "internet" && ready && HasNetwork(device_.board)) {
         internet_ = command.value("on", false);
         engine_->netRestrict("wifi0", !internet_);
         UpdateWebProxy();

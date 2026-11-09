@@ -1,7 +1,7 @@
 # iOS Emulator
 
 Runs classic iPhone OS and iOS (1.0 to 7.1) on Windows: the iPod touch, iPhone 3GS, iPhone 4 and iPad,
-emulated with [qemu-ios](https://github.com/blake-lucas/qemu-ios). Devices can be **jailbroken with Cydia**
+and experimentally the iPhone 4S, emulated with [qemu-ios](https://github.com/blake-lucas/qemu-ios). Devices can be **jailbroken with Cydia**
 when they're prepared, and the app exposes the device to developers: its whole filesystem, a root
 terminal, app installs, the system log and SSH, so tweaks can be built and tested without the hardware.
 
@@ -120,6 +120,14 @@ With the web proxy off, bytes pass through untouched and iOS talks to websites i
 `http` sites and Cydia's repositories work. The proxy never connects to your own computer or local
 network.
 
+### The iPhone 4S (experimental)
+
+The iPhone 4S is the first device here with Apple's A5 chip, and it's marked **Experimental**. iOS 6.1.3
+is the version checked to work: plain or jailbroken, it starts to the home screen and shuts down
+cleanly, and typing, the files, opening apps and the terminal work (Cydia too, when jailbroken). It has no Wi-Fi yet, so no internet or web proxy, and no
+save states. The other versions are listed but untried: when tried, 5.1.1 and 7.1.2 stopped during
+preparation, and 8.x and 9.x can't be prepared yet. Jailbreaking is offered up to iOS 7.
+
 ## Building and running
 
 Open `iOS-Emulator.slnx` in Visual Studio and build **x64**, or from a Developer Command Prompt:
@@ -131,6 +139,16 @@ build\Release\iOS-Emulator.exe
 
 The program finds the `resources` folder next to it or in a parent folder, so it runs straight from
 `build\Release`. To ship it, copy `iOS-Emulator.exe` and `resources\` into one folder.
+
+The engine, `firmwarekit.exe` and the guest helpers in `resources\` are built from the sources in
+`EXTERNAL\` by `EXTERNAL\build.sh`, with a portable MSYS2 kept inside the project (`EXTERNAL\msys64`, not
+in the repository). You only need it to change those binaries. Extract
+[MSYS2's base archive](https://repo.msys2.org/distrib/msys2-x86_64-latest.sfx.exe) into `EXTERNAL\`, then:
+
+```
+EXTERNAL\msys64\usr\bin\bash.exe EXTERNAL/build.sh toolchain     (once: MSYS2's compilers and libraries)
+EXTERNAL\msys64\usr\bin\bash.exe EXTERNAL/build.sh all           (builds everything into resources\)
+```
 
 ## Developer tools
 
@@ -257,6 +275,7 @@ holds `machine.state`, a copy of `state\`, `thumbnail.png` and `slot.json`. Scre
 
 Built on [LightTouch](https://github.com/blake-lucas/LightTouch) by Blake Lucas (its engine, firmwarekit,
 guest tools and firmware catalog, in `resources\`), [qemu-ios](https://github.com/blake-lucas/qemu-ios),
+[iPhonEmu](https://github.com/kazin1898/iPhonEmu) (the iPhone 4S's machine and install helpers),
 [QEMU](https://www.qemu.org), [libimobiledevice](https://libimobiledevice.org),
 [Dear ImGui](https://github.com/ocornut/imgui) and [OpenSSL](https://www.openssl.org), with
 [nlohmann/json](https://github.com/nlohmann/json) and [nanosvg](https://github.com/memononen/nanosvg).

@@ -239,6 +239,8 @@ void s5l8930_l3g_set_accel(DeviceState *dev, struct LIS302DLState *accel);
  * across guest resets. */
 void s5l8930_hdq_set_battery(Chardev *chr, int level, bool charging);
 void s5l8930_hdq_set_capacity(Chardev *chr, int mah);
+/* The gauge's DEVICE_TYPE answer (the A5's bq27540: 0x0540). */
+void s5l8930_hdq_set_device_type(Chardev *chr, uint16_t type);
 
 /*
  * Display (hw/arm/s5l8930_display.c): DisplayPipe0 + CLCD + RGBOUT/TV-out
@@ -247,6 +249,11 @@ void s5l8930_hdq_set_capacity(Chardev *chr, int mah);
  * sysbus IRQ 0 = pipe (S5L8930_IRQ_DISP_PIPE0), 1 = CLCD, 2 = RGBOUT pipe.
  */
 #define TYPE_S5L8930_DISPLAY "s5l8930.display"
+/*
+ * The panel's backlight, 0 (off) to 255 (full), as the board's backlight driver set it: the console shows
+ * every pixel scaled by it, as the panel would (255 at reset, iBoot's level). The A5 board drives it.
+ */
+void s5l8930_display_set_backlight(DeviceState *dev, uint8_t level);
 
 /*
  * CDMA + AES filter (hw/arm/s5l8930_cdma.c). MMIO 0 = channel block
@@ -319,6 +326,8 @@ void s5l8930_cdma_sink_done(DeviceState *dev, uint32_t fifo_base, uint32_t size)
  * sets the device rate. 44.1 kHz until the kernel has programmed either.
  */
 #define S5L8930_NCO_BCLK(n)      (S5L8930_PMGR_BASE + 0x104 + 0x10 * (n))
+/* NCO 0's word as the board has it: S5L8930_NCO_BCLK(0), or the A5's 0x3f100114 (n94.c sets it). */
+extern hwaddr s5l8930_nco_bclk0;
 unsigned s5l8930_i2s_rate(unsigned port);
 /* The same, with the port's output voice set to it while TX runs: a CDMA chain's start. */
 unsigned s5l8930_i2s_sync_rate(unsigned port);

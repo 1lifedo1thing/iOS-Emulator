@@ -12,6 +12,7 @@
 #define TYPE_CS42L58                 "cs42l58"
 #define TYPE_CS42L59                 "cs42l59"   /* + power-down status, rate in 0x0a */
 #define TYPE_CS42L61                 "cs42l61"   /* the 3GS's; its output volume, as cs42l58_output_gain reads it */
+#define TYPE_CS42L63                "cs42l63"   /* + its own power-down status */
 OBJECT_DECLARE_SIMPLE_TYPE(CS42L58State, CS42L58)
 
 typedef struct CS42L58State {
@@ -22,6 +23,7 @@ typedef struct CS42L58State {
 	uint8_t regs[128];
 	bool pdn_status;     /* CS42L59: 0x38 bit 3 reports power-down done */
 	uint8_t rate_reg;    /* the register whose low five bits select LRCLK */
+	bool pdn_status63;   /* CS42L63: 0x62 bit 7, once 0x06 bit 0 (PDN) is set */
 	Clock *lrclk;
 	/* CS42L59 headphone jack, LT_HEADPHONES=1 only */
 	bool hp;             /* a plain headphone is plugged in */

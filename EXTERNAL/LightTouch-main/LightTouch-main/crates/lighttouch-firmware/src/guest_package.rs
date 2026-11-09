@@ -136,7 +136,12 @@ pub fn seed(
 
     let build = plist_string(volume, SYSTEM_VERSION, "ProductBuildVersion")
         .ok_or_else(|| crate::unsupported!("no ProductBuildVersion in /{SYSTEM_VERSION}"))?;
-    let families = ga::packages(&list, None, &build, true)?;
+    let mut families = ga::packages(&list, None, &build, true)?;
+    let major = build.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse::<u32>().unwrap_or(0);
+    if families.is_empty() && major >= 12 {
+        // iOS 8 and 9 (builds 12* and 13*, the iPhone 4S's) have no package of their own: iOS 7's, untested there
+        families = ga::packages(&list, None, "11D257", true)?;
+    }
     if families.len() != 1 {
         return Err(crate::unsupported!("{name}: {} packages for build {build}", families.len()));
     }

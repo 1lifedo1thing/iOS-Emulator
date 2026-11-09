@@ -8,7 +8,7 @@ std::string ProductName(const std::string &board) {
     static const std::map<std::string, std::string> names = {
         {"n45ap", "iPod touch 1G"}, {"m68ap", "iPhone (original)"},    {"n72ap", "iPod touch 2G"},
         {"n18ap", "iPod touch 3G"}, {"n81ap", "iPod touch 4G"}, {"n88ap", "iPhone 3GS"},
-        {"n90ap", "iPhone 4"},      {"k48ap", "iPad"},
+        {"n90ap", "iPhone 4"},      {"k48ap", "iPad"},          {"n94ap", "iPhone 4S"},
     };
     auto found = names.find(board);
     return found != names.end() ? found->second : board;

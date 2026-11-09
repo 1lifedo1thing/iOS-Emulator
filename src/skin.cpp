@@ -25,12 +25,13 @@ namespace {
 ImVec2 Min(ImVec2 a, ImVec2 b) { return ImVec2(std::min(a.x, b.x), std::min(a.y, b.y)); }
 ImVec2 Max(ImVec2 a, ImVec2 b) { return ImVec2(std::max(a.x, b.x), std::max(a.y, b.y)); }
 
-// The art each board wears. The iPod touch 3G looks the same as the 2G from the front.
+// The art each board wears. From the front, the iPod touch 3G looks the same as the 2G, and the
+// iPhone 4S as the iPhone 4.
 std::string SkinFile(const std::string &board) {
     static const std::map<std::string, std::string> files = {
         {"n45ap", "ipod-touch-1g.svg"}, {"n72ap", "ipod-touch-2g.svg"}, {"n18ap", "ipod-touch-2g.svg"},
         {"n81ap", "ipod-touch-4g.svg"}, {"m68ap", "iphone-2g.svg"},     {"n88ap", "iphone-3gs.svg"},
-        {"n90ap", "iphone-4.svg"},      {"k48ap", "ipad.svg"},
+        {"n90ap", "iphone-4.svg"},      {"k48ap", "ipad.svg"},          {"n94ap", "iphone-4.svg"},
     };
     auto found = files.find(board);
     return found != files.end() ? found->second : "ipod-touch-2g.svg";

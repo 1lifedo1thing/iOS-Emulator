@@ -52,11 +52,11 @@ struct ZStream {
     uint32_t adler, reserved;
 };
 
-// Inflates a ZIP member into `size` bytes; empty on failure. resources\zlib1.dll is resolved by
+// Inflates a ZIP member into `size` bytes; empty on failure. resources\libz-1.dll is resolved by
 // name, as the engine is (engine.h), since there is no import library for it.
 std::string Inflate(const std::string &compressed, size_t size) {
     constexpr int kRawDeflate = -15, kFinish = 4, kStreamEnd = 1;
-    static HMODULE zlib = LoadLibraryW(L"zlib1.dll");
+    static HMODULE zlib = LoadLibraryW(L"libz-1.dll");
     if (!zlib)
         return {};
     auto init = reinterpret_cast<int (*)(ZStream *, int, const char *, int)>(GetProcAddress(zlib, "inflateInit2_"));

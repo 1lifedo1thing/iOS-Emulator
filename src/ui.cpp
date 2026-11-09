@@ -549,12 +549,12 @@ public:
             OpenSlots(*device);
     }
     void AskQuickLoad() {                              // for tests: as F9 does
-        if (Device *device = Selected())
+        if (Device *device = Selected(); device && HasSaveStates(device->board))
             AskLoad(*device, kQuickSlot);
     }
     void QuickSave() {                                 // for tests: as F5 does
         Device *device = Selected();
-        if (Session *session = device ? SessionFor(*device) : nullptr)
+        if (Session *session = device && HasSaveStates(device->board) ? SessionFor(*device) : nullptr)
             SaveSlot(*session, kQuickSlot);
     }
 
@@ -980,7 +980,9 @@ void App::StoppedDeviceView(Device &device) {
         ImGui::TextColored(kWarn, "%s", warning);
         ImGui::PopTextWrapPos();
     }
-    const char *internet = settings_.internet ? "with internet" : "without internet (change it in Settings)";
+    const char *internet = !HasNetwork(device.board) ? "without internet (this device's Wi-Fi isn't emulated yet)"
+                           : settings_.internet      ? "with internet"
+                                                     : "without internet (change it in Settings)";
     const float startWidth = ImGui::GetFontSize() * 9;
     CenterRow(startWidth);
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.42f, 0.78f, 1));
@@ -993,13 +995,17 @@ void App::StoppedDeviceView(Device &device) {
     DimText(internet);
 
     ImGui::Spacing();
-    const float manageWidth = ButtonWidth("Save states...") + ButtonWidth("Rename") + ButtonWidth("Erase...") +
-                              ButtonWidth("Delete...") + ButtonWidth("Open folder") + style.ItemSpacing.x * 4;
+    const bool saveStates = HasSaveStates(device.board);
+    const float manageWidth = (saveStates ? ButtonWidth("Save states...") + style.ItemSpacing.x : 0) + ButtonWidth("Rename") +
+                              ButtonWidth("Erase...") + ButtonWidth("Delete...") + ButtonWidth("Open folder") +
+                              style.ItemSpacing.x * 3;
     CenterRow(manageWidth);
-    if (ImGui::Button("Save states..."))
-        OpenSlots(device);
-    Tooltip(("Carry on from a saved state (" + settings_.Shortcut("F9") + " loads the quick save).").c_str());
-    ImGui::SameLine();
+    if (saveStates) {
+        if (ImGui::Button("Save states..."))
+            OpenSlots(device);
+        Tooltip(("Carry on from a saved state (" + settings_.Shortcut("F9") + " loads the quick save).").c_str());
+        ImGui::SameLine();
+    }
     if (ImGui::Button("Rename")) {
         renameText_ = device.name;
         ImGui::OpenPopup("Rename");
@@ -1796,9 +1802,16 @@ void App::SendKeys(Session &session) {
 // The width of the toolbar's row: its buttons, in four groups with a gap between them.
 float App::ToolbarWidth(const Session &session) const {
     const ImGuiStyle &style = ImGui::GetStyle();
-    const char *names[] = {"Rotate", session.paused ? "Resume" : "Pause", "Screenshot", "Record", "Fullscreen", "Save state",
-                           "Load state", "Sound", "Internet", "Web proxy", "Stop"};
-    float width = style.ItemSpacing.x * 2 * 3 + style.ItemSpacing.x * 7;
+    const std::string &board = session.GetDevice().board;
+    std::vector<const char *> names = {"Rotate", session.paused ? "Resume" : "Pause", "Screenshot", "Record", "Fullscreen"};
+    if (HasSaveStates(board))
+        names.insert(names.end(), {"Save state", "Load state"});
+    names.push_back("Sound");
+    if (HasNetwork(board))
+        names.insert(names.end(), {"Internet", "Web proxy"});
+    names.push_back("Stop");
+    const int groups = HasSaveStates(board) ? 4 : 3;
+    float width = style.ItemSpacing.x * 2 * (groups - 1) + style.ItemSpacing.x * (names.size() - groups);
     for (const char *name : names)
         width += IconButtonWidth(name);
     return width;
@@ -1846,18 +1859,20 @@ void App::Controls(Session &session) {
     if (IconButton(icon::kFullscreen, "Fullscreen", "Only the screen, on the whole monitor (F11). F11 or Esc leaves it."))
         EnterFullscreen();
 
-    ImGui::SameLine(0, gap);
-    ImGui::BeginDisabled(!ready);
-    if (IconButton(icon::kSave, "Save state",
-                   "Save the device as it is now, to carry on from there later. " + settings_.Shortcut("F5") +
-                       " saves over the quick save."))
-        ImGui::OpenPopup("Save state");
-    ImGui::EndDisabled();
-    SaveStatePopup(session);
-    ImGui::SameLine();
-    if (IconButton(icon::kLoad, "Load state",
-                   "Carry on from a saved state. " + settings_.Shortcut("F9") + " loads the quick save."))
-        OpenSlots(session.GetDevice());
+    if (HasSaveStates(session.GetDevice().board)) {   // the iPhone 4S can't save its state yet
+        ImGui::SameLine(0, gap);
+        ImGui::BeginDisabled(!ready);
+        if (IconButton(icon::kSave, "Save state",
+                       "Save the device as it is now, to carry on from there later. " + settings_.Shortcut("F5") +
+                           " saves over the quick save."))
+            ImGui::OpenPopup("Save state");
+        ImGui::EndDisabled();
+        SaveStatePopup(session);
+        ImGui::SameLine();
+        if (IconButton(icon::kLoad, "Load state",
+                       "Carry on from a saved state. " + settings_.Shortcut("F9") + " loads the quick save."))
+            OpenSlots(session.GetDevice());
+    }
 
     ImGui::SameLine(0, gap);
     if (IconButton(session.muted ? icon::kMute : icon::kVolume, "Sound", session.muted ? "Sound is off" : "Sound is on",
@@ -1865,19 +1880,22 @@ void App::Controls(Session &session) {
         session.muted = !session.muted;
         session.Send({{"cmd", "mute"}, {"muted", session.muted}});
     }
-    ImGui::SameLine();
+    const bool network = HasNetwork(session.GetDevice().board);   // the iPhone 4S has no Wi-Fi model yet
+    if (network)
+        ImGui::SameLine();
     ImGui::BeginDisabled(!ready);
-    if (IconButton(icon::kGlobe, "Internet",
+    if (network && IconButton(icon::kGlobe, "Internet",
                    std::string("Internet is ") + (session.internet ? "on" : "off") +
                        ": lets iOS reach the internet through your connection (Cydia needs it).",
                    session.internet)) {
         session.internet = !session.internet;
         session.Send({{"cmd", "internet"}, {"on", session.internet}});
     }
-    ImGui::SameLine();
+    if (network)
+        ImGui::SameLine();
     const std::string proxyTip = std::string("Web proxy is ") + (session.webProxy ? "on" : "off") + ". " +
                                  kWebProxyTip + (session.proxyStatus.empty() ? "" : "\n\n" + session.proxyStatus);
-    if (IconButton(icon::kLock, "Web proxy", proxyTip, session.webProxy)) {
+    if (network && IconButton(icon::kLock, "Web proxy", proxyTip, session.webProxy)) {
         session.webProxy = !session.webProxy;
         session.Send({{"cmd", "webproxy"}, {"on", session.webProxy}});
     }
@@ -2424,6 +2442,12 @@ void App::DeviceGrid() {
                      min.y + tall * 0.66f + pad * 1.6f + line + 2, ImGui::GetColorU32(kDim));
             centered(std::to_string(product.versions) + (product.versions == 1 ? " version" : " versions"),
                      min.y + tall * 0.66f + pad * 1.6f + 2 * line + 4, ImGui::GetColorU32(kDim));
+            if (Experimental(product.board)) {   // a tag in the tile's corner
+                const char *tag = "Experimental";
+                const ImVec2 size = ImGui::CalcTextSize(tag), at(min.x + pad * 0.6f, min.y + pad * 0.6f);
+                draw->AddRectFilled(at, ImVec2(at.x + size.x + 10, at.y + size.y + 4), ImGui::GetColorU32(kWarn), 4);
+                draw->AddText(ImVec2(at.x + 5, at.y + 2), IM_COL32(20, 20, 20, 255), tag);
+            }
             if (clicked)
                 ChooseProduct(product.type);
             ImGui::PopID();
@@ -2525,7 +2549,14 @@ void App::VersionPicker() {
     ImGui::Text("iOS %s", firmware->label.c_str());
     ImGui::SameLine();
     DimText("build " + firmware->build + ", released " + firmware->released);
-    if (firmware->Tested())
+    if (Experimental(firmware->board)) {
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextColored(kWarn, "Experimental: the iPhone 4S is new here. It has no Wi-Fi (so no internet) and no save "
+                                  "states yet.%s",
+                           firmware->status == "experimental" ? " This version has been checked to start."
+                                                              : " This version hasn't been tried: it may not start.");
+        ImGui::PopTextWrapPos();
+    } else if (firmware->Tested())
         ImGui::TextColored(kGood, "Runs well (tested by LightTouch).");
     else if (firmware->board == "n45ap" || firmware->board == "m68ap")
         ImGui::TextColored(kWarn, "Experimental: this device currently stops at a white screen after setup.");
@@ -3048,7 +3079,7 @@ std::string SlotTime(int64_t savedAt) {
 // shortcuts' rule: they take Ctrl while the keys do something else (Typing and Controls modes).
 void App::SaveStateKeys(Device *device, Session *session) {
     const ImGuiIO &io = ImGui::GetIO();
-    if (!device || closing_ || io.WantTextInput || editorPopup_ || AnyPopupOpen() ||
+    if (!device || !HasSaveStates(device->board) || closing_ || io.WantTextInput || editorPopup_ || AnyPopupOpen() ||
         io.KeyCtrl != settings_.ShortcutsTakeCtrl() || io.KeyAlt || io.KeyShift)
         return;
     if (session && ImGui::IsKeyPressed(ImGuiKey_F5, false))

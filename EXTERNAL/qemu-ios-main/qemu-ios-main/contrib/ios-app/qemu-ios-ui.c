@@ -41,6 +41,8 @@ bool ipod_touch_nor_io_failed(void);
 bool s5l8930_iop_io_failed(void);
 bool ipod_touch_mipi_dsi_panel_off(void);
 bool s5l8930_d1815_guest_shutdown_confirmed(void);
+bool s5l8940_d1881_guest_shutdown_confirmed(void);
+bool s5l8940_iop_io_failed(void);
 
 #include "qemu-ios-ui.h"
 #include "virtual-input.h"
@@ -104,6 +106,7 @@ static void ios_sequence_reset(void *opaque)
 static int ios_vm_alive;
 /* Which machine is running, latched on the QEMU thread when the VM starts. */
 static int ios_is_ipad1;
+static int ios_is_n94;   /* the iPhone 4S: its D1881 PMU */
 static int ios_dsi_panel;       /* the panel is powered over DSI: the iPad's and the S5L8920 boards' */
 
 static struct {
@@ -910,6 +913,9 @@ bool qemu_ios_ui_ready(void)
 
 bool qemu_ios_ui_guest_shutdown_confirmed(void)
 {
+    if (qatomic_read(&ios_is_n94)) {
+        return s5l8940_d1881_guest_shutdown_confirmed();
+    }
     return qatomic_read(&ios_is_ipad1) ? s5l8930_d1815_guest_shutdown_confirmed()
                                        : pcf50633_guest_shutdown_confirmed();
 }
@@ -929,7 +935,7 @@ int qemu_ios_ui_backlight_level(void)
 bool qemu_ios_ui_storage_failed(void)
 {
     return ipod_touch_fmss_io_failed() || ipod_touch_nor_io_failed() ||
-           s5l8930_iop_io_failed();
+           s5l8930_iop_io_failed() || s5l8940_iop_io_failed();
 }
 
 void qemu_ios_storage_stats(QemuIosStorageStats *out)
@@ -977,7 +983,9 @@ void qemu_ios_ui_vm_started(void)
     ios.con = qemu_console_lookup_by_index(0);
     qatomic_set(&ios_is_ipad1, object_dynamic_cast(qdev_get_machine(),
                                                    MACHINE_TYPE_NAME("ipad1")) != NULL);
-    qatomic_set(&ios_dsi_panel, qatomic_read(&ios_is_ipad1) ||
+    qatomic_set(&ios_is_n94, object_dynamic_cast(qdev_get_machine(),
+                                                 MACHINE_TYPE_NAME("iPhone-4S")) != NULL);
+    qatomic_set(&ios_dsi_panel, qatomic_read(&ios_is_ipad1) || qatomic_read(&ios_is_n94) ||
                 object_dynamic_cast(qdev_get_machine(), "s5l8920-machine") != NULL);
     for (i = 0; i < INPUT_EVENT_SLOTS_MAX; i++) {
         ios.slots[i].tracking_id = -1;
@@ -997,7 +1005,8 @@ void qemu_ios_ui_vm_started(void)
     ios_add_frame_counter_property();
     qemu_register_reset(ios_sequence_reset, NULL);
     portable_has_gyro = object_dynamic_cast(qdev_get_machine(), MACHINE_TYPE_NAME("iPod-Touch-4G")) ||
-                        object_dynamic_cast(qdev_get_machine(), MACHINE_TYPE_NAME("iPhone-4"));
+                        object_dynamic_cast(qdev_get_machine(), MACHINE_TYPE_NAME("iPhone-4")) ||
+                        object_dynamic_cast(qdev_get_machine(), MACHINE_TYPE_NAME("iPhone-4S"));
     qatomic_set(&ios_vm_alive, 1);
 }
 
@@ -1023,6 +1032,8 @@ static const QemuIosDeviceInfo ios_devices[] = {
     { "ipad1",         "k48ap", 1024,  768, 1, 1, false, true,  true,  true,  A4_PANEL },
     { "iPod-Touch-4G", "n81ap",  640,  960, 2, 0, false, true,  false, false, A4_PANEL },
     { "iPhone-4",      "n90ap",  640,  960, 2, 0, true,  true,  true,  false, A4_PANEL },
+    /* the A5 (hw/arm/n94.c, experimental): no baseband model, so no cellular */
+    { "iPhone-4S",     "n94ap",  640,  960, 2, 0, false, true,  true,  false, A4_PANEL },
 };
 
 const QemuIosDeviceInfo *qemu_ios_device_info(const char *machine)
@@ -1189,6 +1200,7 @@ static void ios_press(IPodTouchButton button, bool down)
     ipad1_press_button(button, down);
     ipod_touch_1g_press_button(button, down);
     s5l8920_press_button(button, down);
+    n94_press_button(button, down);
 }
 
 static void ios_button_release(void *opaque)
@@ -1635,7 +1647,9 @@ int qemu_ios_portable_board(const char *machine, QemuIosPortableBoard *out)
     out->scale = d->screen_scale; out->orientation = d->default_orientation;
     out->max_contacts = 5;
     out->capabilities = QEMU_IOS_CAP_ACCEL | QEMU_IOS_CAP_MULTITOUCH | QEMU_IOS_CAP_FRAME_COPY;
-    if (!strcmp(d->board, "n81ap") || !strcmp(d->board, "n90ap")) out->capabilities |= QEMU_IOS_CAP_GYRO;
+    if (!strcmp(d->board, "n81ap") || !strcmp(d->board, "n90ap") || !strcmp(d->board, "n94ap")) {
+        out->capabilities |= QEMU_IOS_CAP_GYRO;
+    }
     /* boards whose codec model reports a headphone jack: machine option headphones=on */
     if (!strcmp(d->board, "n81ap")) out->capabilities |= QEMU_IOS_CAP_HEADPHONES;
     return QEMU_IOS_OK;

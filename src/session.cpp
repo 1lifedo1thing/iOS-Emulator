@@ -1,4 +1,5 @@
 #include "session.h"
+#include "engine.h"
 
 #include <condition_variable>
 
@@ -141,7 +142,7 @@ void Session::StartWorker(const SessionOptions &options) {
     } else if (!options.loadState.empty()) {
         launch.args.insert(launch.args.end(), {L"--load-state", options.loadState.wstring()});
     }
-    if (options.saveSnapshots)
+    if (options.saveSnapshots && HasSaveStates(device_.board))   // the iPhone 4S can't save state yet
         launch.args.push_back(L"--save-snapshots");
     // The engine and the USB libraries read these with getenv(), once, so they go in the
     // environment the worker starts with.

@@ -26,6 +26,7 @@
 #include "qemu/osdep.h"
 #include "qemu/module.h"
 #include "qemu/cutils.h"
+#include "qemu/error-report.h"
 #include "ui/console.h"
 #include "ui/input.h"
 #include "ui/sdl2.h"

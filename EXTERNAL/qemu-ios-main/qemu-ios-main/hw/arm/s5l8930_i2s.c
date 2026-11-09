@@ -38,6 +38,9 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-clock.h"
 #include "hw/arm/s5l8930.h"
+
+/* NCO 0's frequency word (s5l8930.h): the A4's, unless the board moves it (the A5's PMGR, n94.c). */
+hwaddr s5l8930_nco_bclk0 = S5L8930_NCO_BCLK(0);
 #include "hw/arm/ipod_touch_cs42l58.h"
 #include "qemu/audio.h"
 #include "migration/vmstate.h"
@@ -52,6 +55,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(S5L8930I2SState, S5L8930_I2S)
 #define I2S_RXCOM       0x34
 #define I2S_RXFIFO      0x38
 #define I2S_CMD_RUN     6
+/* TXCOM/RXCOM's command is the low byte: the A4 writes 6 alone, the A5's i2s-version 3 driver
+ * sets FIFO fields above it with the same command (10B329: TXCOM <- 0x01ff4a06). */
+#define I2S_CMD(v)      ((v) & 0xff)
 #define I2S_TXCON       0x04
 /*
  * The Samsung I2S (the A4's 'i2s-1,samsung', AppleSamsungI2SController; the S5L8900's and S5L8720's
@@ -176,7 +182,7 @@ unsigned s5l8930_i2s_rate(unsigned port)
     if (s->nco_ref_hz) {
         return i2s_nco_mclk_rate(s);
     }
-    bclk = address_space_ldl_le(&address_space_memory, S5L8930_NCO_BCLK(port),
+    bclk = address_space_ldl_le(&address_space_memory, s5l8930_nco_bclk0 + 0x10 * port,
                                 MEMTXATTRS_UNSPECIFIED, NULL);
     return bclk >= 64 * 8000 && bclk <= 64 * 192000 ? bclk / 64 : 44100;
 }
@@ -302,7 +308,7 @@ static void i2s_out_cb(void *opaque, int free_bytes)
 
 static bool i2s_tx_running(S5L8930I2SState *s)
 {
-    return s->ctrl_run ? s->regs[I2S_CTRL >> 2] & 1 : s->regs[I2S_TXCOM >> 2] == I2S_CMD_RUN;
+    return s->ctrl_run ? s->regs[I2S_CTRL >> 2] & 1 : I2S_CMD(s->regs[I2S_TXCOM >> 2]) == I2S_CMD_RUN;
 }
 
 /*
@@ -415,7 +421,7 @@ static void i2s_write(void *opaque, hwaddr offset, uint64_t value,
     }
     s->regs[offset >> 2] = value;
     if (offset == I2S_RXCOM && s->audio_out) {
-        bool run = value == I2S_CMD_RUN;
+        bool run = I2S_CMD(value) == I2S_CMD_RUN;
 
         if (run) {
             i2s_set_in_rate(s, s5l8930_i2s_rate(s->port));

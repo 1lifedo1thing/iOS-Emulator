@@ -407,6 +407,7 @@ pub fn finished_setup(major: u32, language: &str, locale: &str, now: i64) -> Vec
         ("PBTCPresented", t()),
         ("PBDiagnosticsPresented", t()),
         ("WiFiPresented", t()),
+        ("AssistantPresented", t()), // Siri's page, which only Siri devices (the iPhone 4S on) show
         ("Language", language.into()),
         ("Locale", locale.into()),
     ]);
@@ -702,7 +703,7 @@ pub(crate) mod tests {
             }
             let mut buddy = set(&[
                 "SetupDone", "SetupFinishedAllSteps", "RestoreChoice", "PBTCPresented", "PBDiagnosticsPresented",
-                "WiFiPresented", "Language", "Locale",
+                "WiFiPresented", "AssistantPresented", "Language", "Locale",
             ]);
             buddy.extend(match major {
                 5 => set(&["AppleIDPresented"]),

@@ -129,6 +129,11 @@ pub trait Board {
     fn needs_seal(&self) -> bool;
     /// Outputs hashed for the lock, besides nand/.
     fn shipped(&self) -> Vec<String>;
+    /// Whether the store's chip files are packed into the NAND container (nand_disk). The A5's page store stays a
+    /// directory: its engine model reads the chip files themselves.
+    fn packs_store(&self) -> bool {
+        true
+    }
     /// Before `begin`: what this recipe needs (helper, storage, guest helpers).
     fn check(&mut self, c: &mut Context) -> Result<()>;
     /// After the IPSW is verified: board facts read from it (the iPod's NAND epoch).
@@ -161,6 +166,7 @@ pub fn board_for(o: &Options) -> Result<Box<dyn Board>> {
         }
         ("n45ap", "n45") | ("m68ap", "m68") => Ok(Box::new(crate::n45_recipe::N45Board::new(o)?)),
         ("n72ap", "n72") => Ok(Box::new(crate::n72_recipe::N72Board::new(o)?)),
+        ("n94ap", "n94") => Ok(Box::new(crate::n94_recipe::N94Board::new(o)?)),
         _ => Err(crate::unsupported!("{}: no preparer for board {} recipe {recipe}", e.id, e.board)),
     }
 }
@@ -340,13 +346,15 @@ pub fn run(o: Options, board: &mut dyn Board, emit: Emit) -> Result<()> {
 
         step(&c); // the store packed into its container, lock
         // Its data is read once to pack and the container (about as large) once to hash.
-        let data = crate::nand_disk::data_bytes(&c.nand)?;
-        let done = ByteCount::new(2 * data);
+        let data = if board.packs_store() { crate::nand_disk::data_bytes(&c.nand)? } else { 0 };
+        let done = ByteCount::new(2 * data.max(1));
         {
             let d = done.clone();
             progress.measure(Some(Box::new(move || d.fraction())));
         }
-        crate::nand_disk::pack(&c.nand, &|n| done.add(n))?;
+        if board.packs_store() {
+            crate::nand_disk::pack(&c.nand, &|n| done.add(n))?;
+        }
         let nand_files = files::tree_files(&c.nand)?;
         let (hashes, listing) = files::nand_listing(&c.nand, &nand_files, &|n| done.add(n))?;
         c.nand_hashes = hashes;

@@ -1,0 +1,12 @@
+# Build output and Visual Studio's per-user files
+/build/
+/.vs/
+*.vcxproj.user
+
+# The portable toolchains and build folders of EXTERNAL/build.sh (CLAUDE.md says how to set them up)
+/EXTERNAL/msys64/
+/EXTERNAL/build/
+/EXTERNAL/rust/
+
+# iPhonEmu, kept locally as a reference: its iPhone 4S machine is merged into EXTERNAL/qemu-ios-main
+/bullshido/

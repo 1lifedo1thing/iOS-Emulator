@@ -62,7 +62,10 @@ for source in [src / 'contrib/ios-app/qemu-ios-entry.c', src / 'contrib/ios-app/
     subprocess.run(compiler + base + ['-c', str(source), '-o', str(obj)], cwd=build, check=True)
 
 # Export the app ABI only: every qemu_ios_* function the new objects define.
-nm = compiler[0].replace('gcc-posix', 'nm').replace('-gcc', '-nm')
+# A cross compiler names its tools after itself (x86_64-w64-mingw32-gcc-posix -> -nm, -g++); a native
+# MSYS2 build (UCRT64) compiles with plain cc/gcc, whose tools are nm and g++.
+native = pathlib.Path(compiler[0]).stem in ('cc', 'gcc')
+nm = 'nm' if native else compiler[0].replace('gcc-posix', 'nm').replace('-gcc', '-nm')
 if not nm.endswith('nm'):
     nm = 'x86_64-w64-mingw32-nm'
 names = set()
@@ -91,7 +94,7 @@ for arg in link:
     args.append(arg)
 output = out / 'libqemu-arm.dll'
 # C++ objects (the PVRTC decoder) need the C++ driver for their runtime.
-linker = [compiler[0].replace('-gcc', '-g++')] + compiler[1:]
+linker = ['g++' if native else compiler[0].replace('-gcc', '-g++')] + compiler[1:]
 args = linker + args + ['-shared', str(out / 'libqemu-arm.def'), '-Wl,--out-implib,' + str(out / 'libqemu-arm.dll.a'),
                           '-o', str(output)]
 (out / 'link.json').write_text(json.dumps(args, indent=2) + '\n')

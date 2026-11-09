@@ -52,6 +52,8 @@ static bool codec_trace(void)
 #define CS42L59_REG_MASK2  0x37
 #define CS42L59_REG_INT3   0x3a
 #define CS42L59_INT_TYPE   0x18
+#define CS42L63_REG_STATUS 0x62
+#define CS42L63_PDN_DONE   0x80
 
 static unsigned cs42l58_sample_rate(uint8_t control)
 {
@@ -179,6 +181,15 @@ static uint8_t cs42l58_recv(I2CSlave *i2c)
     if (s->pdn_status && reg == CS42L59_REG_STATUS &&
         (s->regs[CS42L59_REG_PWRCTL] & 3) == 3) {
         res |= CS42L59_PDN_DONE;
+    }
+    /*
+     * AppleCS42L63Audio powers the part down (10B329, 0x80acbebc: 0x06 bit 0, then 0x62
+     * read every 10 ms until bit 7 is set, with no limit) from the system's shutdown,
+     * IOMikeyBusFamily's systemWillShutdown. A plain register file kept bit 7 clear and the
+     * halt of "slide to power off" never got past it.
+     */
+    if (s->pdn_status63 && reg == CS42L63_REG_STATUS && (s->regs[CS42L59_REG_PWRCTL] & 1)) {
+        res |= CS42L63_PDN_DONE;
     }
 
     if (s->hp && s->pdn_status) {
@@ -341,11 +352,24 @@ static const TypeInfo cs42l61_info = {
     .instance_init = cs42l61_init,
 };
 
+/* The iPhone 4S's (n94.c): a CS42L58 register file that reports its own power-down done. */
+static void cs42l63_init(Object *obj)
+{
+    CS42L58(obj)->pdn_status63 = true;
+}
+
+static const TypeInfo cs42l63_info = {
+    .name          = TYPE_CS42L63,
+    .parent        = TYPE_CS42L58,
+    .instance_init = cs42l63_init,
+};
+
 static void cs42l58_register_types(void)
 {
     type_register_static(&cs42l58_info);
     type_register_static(&cs42l59_info);
     type_register_static(&cs42l61_info);
+    type_register_static(&cs42l63_info);
 }
 
 type_init(cs42l58_register_types)

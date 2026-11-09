@@ -34,7 +34,7 @@ pub fn boot_args(jailbreak: bool) -> String {
 /// behaviour): sb_evaluate is made to allow, so Substrate's inserted library loads inside the built-in app profiles;
 /// and on 7.x the rootfs remount check is cleared, so launchd's `mount -u -o rw /` from /etc/fstab succeeds and Cydia
 /// can write the root filesystem.
-fn jailbreak_kernel(kernel: &[u8], log: &dyn Fn(&str)) -> Vec<u8> {
+pub(crate) fn jailbreak_kernel(kernel: &[u8], log: &dyn Fn(&str)) -> Vec<u8> {
     let mut out = kernel.to_vec();
     match sandbox_patch::apply(&out) {
         Ok((patched, found)) => {

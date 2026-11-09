@@ -58,3 +58,10 @@ std::vector<std::string> BuildBootArgs(const Device &device, const BootOptions &
 
 // Boards that boot from their SecureROM need the boot ROM file; later boards don't.
 bool NeedsBootrom(const std::string &board);
+
+// What the experimental A5 (the iPhone 4S) lacks: Wi-Fi (no internet, no web proxy) and save states
+// (its models don't save their state yet). True for every other board.
+bool HasNetwork(const std::string &board);
+bool HasSaveStates(const std::string &board);
+// Boards the app tags "Experimental" (the A5, iPhone 4S). False for a board it doesn't know.
+bool Experimental(const std::string &board);

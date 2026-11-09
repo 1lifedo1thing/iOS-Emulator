@@ -10,6 +10,8 @@ pub enum Soc {
     S5l8720,
     S5l8920,
     S5l8930,
+    /// The A5 (iPhone 4S): booted by kboot, its NAND a PPN page store (n94_recipe).
+    S5l8940,
 }
 
 /// The boards Light Touch runs and the facts preparation reads.
@@ -23,6 +25,7 @@ pub enum Board {
     K48,
     N81,
     N90,
+    N94,
 }
 
 impl Board {
@@ -36,6 +39,7 @@ impl Board {
             "k48ap" => Board::K48,
             "n81ap" => Board::N81,
             "n90ap" => Board::N90,
+            "n94ap" => Board::N94,
             _ => return None,
         })
     }
@@ -49,6 +53,7 @@ impl Board {
             Board::K48 => "k48ap",
             Board::N81 => "n81ap",
             Board::N90 => "n90ap",
+            Board::N94 => "n94ap",
         }
     }
     pub fn soc(self) -> Soc {
@@ -57,6 +62,7 @@ impl Board {
             Board::N72 => Soc::S5l8720,
             Board::N18 | Board::N88 => Soc::S5l8920,
             Board::K48 | Board::N81 | Board::N90 => Soc::S5l8930,
+            Board::N94 => Soc::S5l8940,
         }
     }
     pub fn product_type(self) -> &'static str {
@@ -69,6 +75,7 @@ impl Board {
             Board::K48 => "iPad1,1",
             Board::N81 => "iPod4,1",
             Board::N90 => "iPhone3,1",
+            Board::N94 => "iPhone4,1",
         }
     }
     pub fn marketing_name(self) -> &'static str {
@@ -81,10 +88,11 @@ impl Board {
             Board::K48 => "iPad",
             Board::N81 => "iPod touch (4th generation)",
             Board::N90 => "iPhone 4",
+            Board::N94 => "iPhone 4S",
         }
     }
     pub fn is_phone(self) -> bool {
-        matches!(self, Board::M68 | Board::N88 | Board::N90)
+        matches!(self, Board::M68 | Board::N88 | Board::N90 | Board::N94)
     }
     /// The S5L8920/S5L8930 boards: prepared alike, booted by kboot (iBoot too on K48).
     pub fn is_kboot(self) -> bool {
@@ -187,6 +195,29 @@ pub fn ipad(d: &IPad, hardware: &DeviceInfo, serial: &str) -> BootConfig {
         .collect();
     argv.extend(["-audio", "driver=none", "-serial", serial].iter().map(|s| s.to_string()));
     BootConfig { argv, machine: board.clone() }
+}
+
+/// One preparation boot of the iPhone 4S (-M iPhone-4S): its kboot bundle on `cpus` cores and its page store,
+/// written in place (`overlay` None) or through an overlay. The machine has no die-id, Wi-Fi or baseband options.
+pub struct N94 {
+    pub kboot: String,
+    pub nand: String,
+    pub overlay: Option<String>,
+    pub cpus: u32,
+}
+
+pub fn n94(d: &N94, hardware: &DeviceInfo, serial: &str) -> BootConfig {
+    let mut machine = format!("{},kboot={},nand={}", hardware.machine, escape(&d.kboot), escape(&d.nand));
+    if let Some(o) = &d.overlay {
+        machine += &format!(",nand-overlay={}", escape(o));
+    }
+    let cpus = d.cpus.to_string();
+    let argv = ["LightTouchMac", "-M", &machine, "-smp", &cpus, "-display", "none", "-monitor", "none", "-no-reboot",
+                "-audio", "driver=none", "-serial", serial]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    BootConfig { argv, machine: hardware.machine.clone() }
 }
 
 /// One preparation boot of the iPod touch 2G (BootRecipe.iPod).

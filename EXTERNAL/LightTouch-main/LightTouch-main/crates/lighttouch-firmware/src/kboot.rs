@@ -58,6 +58,26 @@ const USBPHY_HZ: u32 = 24_000_000;
 /// PreparedDeviceBoot.ncorefHz).
 pub const NCOREF_HZ: u32 = 162_000_000;
 
+/// The A5's DRAM base (iPhonEmu docs/n94/hardware.md).
+pub const A5_PHYS_BASE: u32 = 0x8000_0000;
+/// The A5's cpu0 rates as iPhonEmu fills them (800 MHz CPU, 400 MHz memory, 200 MHz bus): clock-frequency,
+/// memory-, bus-, peripheral-, fixed- and timebase-frequency.
+const A5_CPU0: [u32; 6] = [800_000_000, 400_000_000, 200_000_000, 100_000_000, 24_000_000, 24_000_000];
+
+/// arm-io/clock-frequencies on the A5: AppleS5L8940XIO names each slot it publishes (10B329 0x809014d0): "nclk" 30
+/// and 50-54 get the 24 MHz reference, as slot 0 (the oscillator); the "hclk" slots 31, 33, 36-44 and 63 the bus clock;
+/// the rest the peripheral clock (iPhonEmu's kboot.py: the 4S's real PLL values aren't known).
+fn a5_clocks() -> Vec<u32> {
+    let mut c = vec![100_000_000; 64];
+    for i in [0, 30, 50, 51, 52, 53, 54] {
+        c[i] = 24_000_000;
+    }
+    for i in [31, 33, 36, 37, 38, 39, 40, 41, 42, 43, 44, 63] {
+        c[i] = 200_000_000;
+    }
+    c
+}
+
 /// The iPad's measured cpu0 rates in every slot.
 fn default_clocks() -> Vec<u32> {
     let mut c = vec![PERIPH_HZ; 55];
@@ -165,6 +185,8 @@ pub struct Board {
     pub model_number: &'static str,
     /// DRAM bytes: memSize, vram and pram sit at its top, as iBoot puts them.
     pub dram: u32,
+    /// Where DRAM starts (PHYS_BASE on the A4s, 0x80000000 on the A5): the kernel loads there, VA == PA - its base.
+    pub phys_base: u32,
     /// A radio board (N90) keeps its baseband node; the machine's `baseband` property unmatches it at boot.
     pub radio: bool,
     /// The machine answers the Bluetooth HCI on the UART the DT hangs the board's bluetooth node off (qemu-ios bt_uart),
@@ -209,6 +231,7 @@ impl Board {
             board_id,
             model_number,
             dram: DRAM_SIZE,
+            phys_base: PHYS_BASE,
             radio: false,
             bluetooth_hci: false,
             platform_name: "s5l8930x",
@@ -271,9 +294,30 @@ impl Board {
         Board { bluetooth_hci: true, platform_name: "s5l8922x", chip_id: 0x8922, ..Board::base(320, 480, 0, 1, 0x02, "MC008") }
     }
 
+    /// iPhone 4S (S5L8940X, the A5): -M iPhone-4S, model MD234, 512 MiB at 0x80000000 (iPhonEmu's kboot.py N94AP).
+    /// Its baseband node stays matched, as iPhonEmu boots it: with no modem behind the HSIC port it times out cleanly.
+    pub fn n94() -> Board {
+        Board {
+            dram: 0x2000_0000,
+            phys_base: A5_PHYS_BASE,
+            radio: true,
+            platform_name: "s5l8940x",
+            chip_id: 0x8940,
+            clocks: a5_clocks(),
+            chip_revision: 0x10,
+            ..Board::base(640, 960, 0, 2, 0x08, "MD234")
+        }
+    }
+
+    /// The A5 (S5L8940X): its own clocks, the NAND a PPN store, the NVRAM on it, no NOR.
+    pub fn is_a5(&self) -> bool {
+        self.platform_name == "s5l8940x"
+    }
+
     /// By the catalog's board name (K48Recipe.a4): K48 for anything else.
     pub fn for_board(board: &str) -> Board {
         match board {
+            "n94ap" => Board::n94(),
             "n81ap" => Board::n81(),
             "n90ap" => Board::n90(),
             "n88ap" => Board::n88(),
@@ -298,6 +342,7 @@ impl Board {
             "N90AP" => Board::n90(),
             "N88AP" => Board::n88(),
             "N18AP" => Board::n18(),
+            "N94AP" => Board::n94(),
             _ => Board::k48(),
         }
     }
@@ -307,13 +352,13 @@ impl Board {
     }
 
     pub fn vram_pa(&self) -> u32 {
-        PHYS_BASE + self.mem_size()
+        self.phys_base + self.mem_size()
     }
 
     /// iBoot puts the A4's PRAM at the top of its 512 MiB DRAM window whatever the DRAM (0x5fffc000 on the 256 MiB iPad
     /// too, where the window mirrors DRAM); the S5L8920's at the top of its DRAM.
     pub fn pram_pa(&self) -> u32 {
-        PHYS_BASE + if self.is_s5l8920() { self.dram } else { 0x2000_0000 } - PRAM_SIZE
+        self.phys_base + if self.is_s5l8920() { self.dram } else { 0x2000_0000 } - PRAM_SIZE
     }
 }
 
@@ -544,7 +589,19 @@ pub fn nvram_image(size: usize) -> Vec<u8> {
     out
 }
 
-fn fill_dt(dt: &mut DeviceTree, memory_map: &[(String, u32, u32)], identity: &UnitIdentity, iboot: &str, root_matching: &str) -> Result<()> {
+/// What a board other than the A4s adds to a boot (the A5, iPhone 4S): its store's geometry for the NAND nodes,
+/// how many cores the kernel sees, and nodes to hide (the install boot's AE2).
+#[derive(Debug, Clone, Default)]
+pub struct Extra {
+    pub ppn: Option<crate::n94nand::Geometry>,
+    /// 1: cpu1 unmatched and "cpus=1" in the boot-args (AppleARMPE counts every child of /cpus, and only the
+    /// boot-arg lowers that); 0 or 2: both.
+    pub cpus: u32,
+    pub hide: Vec<&'static str>,
+}
+
+fn fill_dt(dt: &mut DeviceTree, memory_map: &[(String, u32, u32)], identity: &UnitIdentity, iboot: &str, root_matching: &str,
+           extra: &Extra) -> Result<()> {
     let board = Board::of(dt);
     let (root, chosen, macs) = identity_dt(identity, &board)?;
     dt.set("", "platform-name", Value::Str(board.platform_name.into()))?;
@@ -571,8 +628,13 @@ fn fill_dt(dt: &mut DeviceTree, memory_map: &[(String, u32, u32)], identity: &Un
         }
         dt.set("chosen", k, v)?;
     }
-    // iBoot-1537/1940 (6.x/7.x) hand NVRAM over as /chosen/nvram-proxy-data; the IPSW DT reserves it zeroed.
-    if let Some(slot) = dt.slot("chosen", "nvram-proxy-data") {
+    // iBoot-1537/1940 (6.x/7.x) hand NVRAM over as /chosen/nvram-proxy-data; the IPSW DT reserves it zeroed. Not on
+    // the A5, whose NVRAM is on the NAND (IOFlashNVRAM): a seed would replace what the last boot saved, every boot.
+    if board.is_a5() {
+        if dt.has("chosen", "nvram-proxy-data") {
+            dt.rename("chosen", "nvram-proxy-data", "nvram-proxy-unused")?; // renamed: the kernel looks for none
+        }
+    } else if let Some(slot) = dt.slot("chosen", "nvram-proxy-data") {
         dt.set("chosen", "nvram-proxy-data", Value::Bytes(nvram_image(slot.length)))?;
     }
     // Every iBoot read so far (817, 931, the iPhone 4's 1072) leaves a BOOTREPLY header there, the rest zero.
@@ -592,20 +654,43 @@ fn fill_dt(dt: &mut DeviceTree, memory_map: &[(String, u32, u32)], identity: &Un
             dt.set("chosen", k, Value::Bytes(mac.clone()))?;
         }
     }
-    for (k, hz) in [
-        ("clock-frequency", CPU_HZ),
-        ("memory-frequency", MEM_HZ),
-        ("bus-frequency", BUS_HZ),
-        ("peripheral-frequency", PERIPH_HZ),
-        ("fixed-frequency", FIXED_HZ),
-        ("timebase-frequency", TIMEBASE_HZ),
-    ] {
+    let cpu0 = if board.is_a5() { A5_CPU0 } else { [CPU_HZ, MEM_HZ, BUS_HZ, PERIPH_HZ, FIXED_HZ, TIMEBASE_HZ] };
+    for (k, hz) in ["clock-frequency", "memory-frequency", "bus-frequency", "peripheral-frequency", "fixed-frequency",
+                    "timebase-frequency"]
+        .into_iter()
+        .zip(cpu0)
+    {
         dt.set("cpus/cpu0", k, Value::U32(hz))?;
+    }
+    if extra.cpus == 1 && dt.contains("cpus/cpu1") {
+        // one core: the second CPU's node matches nothing and is not a "cpu"
+        for (k, v) in [("compatible", "none"), ("device_type", "off"), ("name", "xcpu")] {
+            dt.set("cpus/cpu1", k, Value::Str(v.into()))?;
+        }
+    }
+    for node in &extra.hide {
+        if dt.contains(node) {
+            dt.set(node, "compatible", Value::Str("none".into()))?;
+        }
+    }
+    if board.is_a5() {
+        // The motion sensors' factory calibration, which iBoot copies from syscfg into the zeroed slots: kboot has no
+        // syscfg, so a nominal part's identity matrix (9 words of 16.16). With zeros 6.x's AppleLIS331DLH fails its
+        // start and AppleAP3GDL finds its matrix singular.
+        let unit = vec![0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x10000];
+        let paths: Vec<String> = dt.props.keys().cloned().collect();
+        for path in paths {
+            for prop in ["accel-sensitivity-calibration", "gyro-sensitivity-calibration", "gyro-sens-matrix-inverse"] {
+                if dt.has(&path, prop) {
+                    dt.set(&path, prop, Value::Words(unit.clone()))?;
+                }
+            }
+        }
     }
     let slots = dt.slot("arm-io", "clock-frequencies").map_or(board.clocks.len() * 4, |s| s.length) / 4;
     dt.set("arm-io", "clock-frequencies", Value::Words(board.clocks.iter().copied().take(slots).collect()))?;
     dt.set("arm-io", "usbphy-frequency", Value::U32(USBPHY_HZ))?;
-    if !board.is_s5l8920() {
+    if !board.is_s5l8920() && !board.is_a5() {
         let bridge = hex::decode(A4_BRIDGE_SETTINGS).unwrap_or_default();
         if dt.slot("arm-io/pmgr", "bridge-settings").is_some_and(|s| s.length >= bridge.len()) {
             dt.set("arm-io/pmgr", "bridge-settings", Value::Bytes(bridge))?;
@@ -673,6 +758,15 @@ fn fill_dt(dt: &mut DeviceTree, memory_map: &[(String, u32, u32)], identity: &Un
     }
     for node in NAND_NODES {
         let Some(props) = dt.props.get(node).cloned() else { continue };
+        if let Some(g) = &extra.ppn {
+            // the A5's PPN store (n94nand): the kernel and the page store read the same geometry
+            for (k, v) in g.dt_props() {
+                if props.contains_key(k) {
+                    dt.set(node, k, Value::Bytes(v))?;
+                }
+            }
+            continue;
+        }
         for (k, v) in &NAND {
             if props.contains_key(*k) {
                 dt.set(node, k, Value::U32(*v))?;
@@ -690,6 +784,12 @@ fn fill_dt(dt: &mut DeviceTree, memory_map: &[(String, u32, u32)], identity: &Un
 
 /// The flat physical image, its load PA, entry PA and boot_args PA. `ramdisk`: raw HFS to boot as md0.
 pub fn build(kernel: &[u8], device_tree: &[u8], boot_args: &str, identity: &UnitIdentity, iboot: &str, ramdisk: Option<&[u8]>) -> Result<Image> {
+    build_extra(kernel, device_tree, boot_args, identity, iboot, ramdisk, &Extra::default())
+}
+
+/// `build` with a board's extras (Extra: the A5).
+pub fn build_extra(kernel: &[u8], device_tree: &[u8], boot_args: &str, identity: &UnitIdentity, iboot: &str,
+                   ramdisk: Option<&[u8]>, extra: &Extra) -> Result<Image> {
     let page = |n: usize| (n + 0xFFF) & !0xFFF;
     let m = MachO::new(kernel)?;
     let segs: Vec<&MachSegment> = m.segments.iter().filter(|s| s.name != "__PAGEZERO").collect();
@@ -699,10 +799,12 @@ pub fn build(kernel: &[u8], device_tree: &[u8], boot_args: &str, identity: &Unit
         return Err(crate::unsupported!("kernelcache has no segments"));
     };
     let vbase = (lowest & 0xF000_0000) as usize;
-    let pa = |va: usize| (va as i64 - vbase as i64 + PHYS_BASE as i64) as u32;
     let mut dt = DeviceTree::new(device_tree)?;
     let board = Board::of(&dt);
-    graft_nor(&mut dt)?;
+    let pa = |va: usize| (va as i64 - vbase as i64 + board.phys_base as i64) as u32;
+    if !board.is_a5() {
+        graft_nor(&mut dt)?; // the A5 has no NOR: its NVRAM and firmware live on the NAND
+    }
     // Host nubs (EHCI, OHCI0) up at arbitrator start, next to device mode (qemu-ios docs/ipad1/usb-keyboard.md).
     if dt.contains("arm-io/usb-complex") {
         dt.add("arm-io/usb-complex", "hsic-enabled", &[])?;
@@ -711,6 +813,9 @@ pub fn build(kernel: &[u8], device_tree: &[u8], boot_args: &str, identity: &Unit
     let mut top = page(end);
     let rd_va = top;
     let mut args = boot_args.to_string();
+    if extra.cpus == 1 && !args.contains("cpus=") {
+        args.push_str(" cpus=1");
+    }
     if let Some(rd) = ramdisk {
         top += page(rd.len());
         args.push_str(" rd=md0");
@@ -738,7 +843,7 @@ pub fn build(kernel: &[u8], device_tree: &[u8], boot_args: &str, identity: &Unit
     }
     memory_map.push(("DeviceTree".into(), pa(dt_va), dt_len as u32));
     memory_map.push(("BootArgs".into(), pa(args_va), 0x1000));
-    fill_dt(&mut dt, &memory_map, identity, iboot, if ramdisk.is_none() { ROOT_MATCHING } else { "" })?;
+    fill_dt(&mut dt, &memory_map, identity, iboot, if ramdisk.is_none() { ROOT_MATCHING } else { "" }, extra)?;
     let d = dt.data();
     image[dt_va - vbase..dt_va - vbase + d.len()].copy_from_slice(d);
 
@@ -752,7 +857,7 @@ pub fn build(kernel: &[u8], device_tree: &[u8], boot_args: &str, identity: &Unit
     let mut ba = vec![1, 0, m.boot_args_version(), 0];
     ba.extend(devicetree::le(&[
         vbase as u32,
-        PHYS_BASE,
+        board.phys_base,
         board.mem_size(),
         top_of_kernel,
         board.vram_pa(),
@@ -768,7 +873,7 @@ pub fn build(kernel: &[u8], device_tree: &[u8], boot_args: &str, identity: &Unit
     ba.extend_from_slice(cmdline);
     ba.resize(ba.len() + 256 - cmdline.len(), 0);
     image[args_va - vbase..args_va - vbase + ba.len()].copy_from_slice(&ba);
-    Ok(Image { image, load_pa: PHYS_BASE, entry_pa: pa(m.entry()? as usize), boot_args_pa: pa(args_va) })
+    Ok(Image { image, load_pa: board.phys_base, entry_pa: pa(m.entry()? as usize), boot_args_pa: pa(args_va) })
 }
 
 /// image + segments ("K48SEG\0\0", pa, len, flags bit 0 = zero-fill, data) + the 24-byte trailer.
@@ -789,6 +894,12 @@ pub fn bundle(img: &Image, segments: &[Segment]) -> Vec<u8> {
 /// ipad1_kboot.main: kboot.bin's bytes from a decrypted-firmware directory. `kernel_override`: the kernel to boot in
 /// place of kernelcache.mach (a jailbroken device's sandbox-patched one).
 pub fn make(decrypted: &Path, identity: &UnitIdentity, boot_args: &str, ramdisk: Option<&Path>, kernel_override: Option<&[u8]>) -> Result<Vec<u8>> {
+    make_extra(decrypted, identity, boot_args, ramdisk, kernel_override, &Extra::default())
+}
+
+/// `make` with a board's extras (Extra: the A5).
+pub fn make_extra(decrypted: &Path, identity: &UnitIdentity, boot_args: &str, ramdisk: Option<&Path>,
+                  kernel_override: Option<&[u8]>, extra: &Extra) -> Result<Vec<u8>> {
     let file = |n: &str| decrypted.join(n);
     let kernel = match kernel_override {
         Some(k) => k.to_vec(),
@@ -800,7 +911,7 @@ pub fn make(decrypted: &Path, identity: &UnitIdentity, boot_args: &str, ramdisk:
         Some(p) => Some(std::fs::read(p)?),
         None => None,
     };
-    let img = build(&kernel, &dt, boot_args, identity, &iboot_version(iboot.as_deref()), rd.as_deref())?;
+    let img = build_extra(&kernel, &dt, boot_args, identity, &iboot_version(iboot.as_deref()), rd.as_deref(), extra)?;
     let board = Board::of(&DeviceTree::new(&dt)?);
     let logo = if file("AppleLogo.bin").exists() {
         logo_segments(&std::fs::read(file("AppleLogo.bin"))?, board.vram_pa(), board.fb_width, board.fb_height, board.rotation == 270)?
